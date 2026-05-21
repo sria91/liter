@@ -1,0 +1,9 @@
+[package]
+name = "sqlite3-fmt"
+description = "SQLite3-rs: printf and strftime implementations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true

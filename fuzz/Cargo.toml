@@ -1,0 +1,59 @@
+[package]
+name = "fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+sqlite3-tokenizer = { path = "../crates/sqlite3-tokenizer" }
+sqlite3-parser = { path = "../crates/sqlite3-parser" }
+sqlite3-record = { path = "../crates/sqlite3-record" }
+sqlite3-vdbe = { path = "../crates/sqlite3-vdbe" }
+sqlite3 = { path = "../crates/sqlite3" }
+
+[[bin]]
+name = "fuzz_tokenizer"
+path = "fuzz_targets/fuzz_tokenizer.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_pager"
+path = "fuzz_targets/fuzz_pager.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_btree"
+path = "fuzz_targets/fuzz_btree.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_vdbe"
+path = "fuzz_targets/fuzz_vdbe.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_full_db"
+path = "fuzz_targets/fuzz_full_db.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_file_format"
+path = "fuzz_targets/fuzz_file_format.rs"
+test = false
+doc = false

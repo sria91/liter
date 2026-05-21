@@ -1,0 +1,13 @@
+[package]
+name = "differential"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# Enable differential testing against C SQLite (requires libsqlite3 installed).
+differential = ["rusqlite"]
+
+[dependencies]
+sqlite3 = { path = "../../crates/sqlite3" }
+rusqlite = { workspace = true, optional = true }

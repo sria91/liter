@@ -1,0 +1,11 @@
+[package]
+name = "sqlite3-schema"
+description = "SQLite3-rs: schema management, table/index catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sqlite3-ast = { path = "../sqlite3-ast" }
+thiserror.workspace = true
+parking_lot.workspace = true

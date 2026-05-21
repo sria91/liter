@@ -1,0 +1,25 @@
+[package]
+name = "benches"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bench]]
+name = "speedtest1"
+harness = false
+
+[[bench]]
+name = "insert_bench"
+harness = false
+
+[[bench]]
+name = "select_bench"
+harness = false
+
+[[bench]]
+name = "wal_bench"
+harness = false
+
+[dev-dependencies]
+criterion = { workspace = true }
+sqlite3 = { path = "../crates/sqlite3" }

@@ -1,0 +1,101 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sqlite3-alloc",
+    "crates/sqlite3-sync",
+    "crates/sqlite3-unicode",
+    "crates/sqlite3-fmt",
+    "crates/sqlite3-config",
+    "crates/sqlite3-vfs",
+    "crates/sqlite3-vfs-unix",
+    "crates/sqlite3-vfs-win",
+    "crates/sqlite3-vfs-mem",
+    "crates/sqlite3-pager",
+    "crates/sqlite3-btree",
+    "crates/sqlite3-record",
+    "crates/sqlite3-tokenizer",
+    "crates/sqlite3-parser",
+    "crates/sqlite3-ast",
+    "crates/sqlite3-resolve",
+    "crates/sqlite3-optimizer",
+    "crates/sqlite3-codegen",
+    "crates/sqlite3-vdbe",
+    "crates/sqlite3-functions",
+    "crates/sqlite3-schema",
+    "crates/sqlite3-ffi",
+    "crates/sqlite3-fts5",
+    "crates/sqlite3-json",
+    "crates/sqlite3-rtree",
+    "crates/sqlite3",
+    "tools/sqlite3-shell",
+    "benches",
+    "tests/differential",
+    "tests/format_compat",
+    "tests/tcl_suite",
+    "tests/oom",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = []
+
+[workspace.dependencies]
+# Error handling
+thiserror = "2"
+
+# Tokenizer
+logos = "0.15"
+
+# Data structures
+arrayvec = "0.7"
+
+# Concurrency
+parking_lot = "0.12"
+
+# Memory-mapped I/O
+memmap2 = "0.9"
+getrandom = "0.2"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Testing
+proptest = "1"
+arbitrary = { version = "1", features = ["derive"] }
+tempfile = "3"
+
+# C SQLite bindings (differential harness only)
+rusqlite = "0.32"
+
+# Bit flags
+bitflags = "2"
+
+# Internal crates
+sqlite3-alloc = { path = "crates/sqlite3-alloc" }
+sqlite3-sync = { path = "crates/sqlite3-sync" }
+sqlite3-unicode = { path = "crates/sqlite3-unicode" }
+sqlite3-fmt = { path = "crates/sqlite3-fmt" }
+sqlite3-config = { path = "crates/sqlite3-config" }
+sqlite3-vfs = { path = "crates/sqlite3-vfs" }
+sqlite3-vfs-unix = { path = "crates/sqlite3-vfs-unix" }
+sqlite3-vfs-win = { path = "crates/sqlite3-vfs-win" }
+sqlite3-vfs-mem = { path = "crates/sqlite3-vfs-mem" }
+sqlite3-pager = { path = "crates/sqlite3-pager" }
+sqlite3-btree = { path = "crates/sqlite3-btree" }
+sqlite3-record = { path = "crates/sqlite3-record" }
+sqlite3-tokenizer = { path = "crates/sqlite3-tokenizer" }
+sqlite3-parser = { path = "crates/sqlite3-parser" }
+sqlite3-ast = { path = "crates/sqlite3-ast" }
+sqlite3-resolve = { path = "crates/sqlite3-resolve" }
+sqlite3-optimizer = { path = "crates/sqlite3-optimizer" }
+sqlite3-codegen = { path = "crates/sqlite3-codegen" }
+sqlite3-vdbe = { path = "crates/sqlite3-vdbe" }
+sqlite3-functions = { path = "crates/sqlite3-functions" }
+sqlite3-schema = { path = "crates/sqlite3-schema" }
+sqlite3-ffi = { path = "crates/sqlite3-ffi" }
+sqlite3-fts5 = { path = "crates/sqlite3-fts5" }
+sqlite3-json = { path = "crates/sqlite3-json" }
+sqlite3-rtree = { path = "crates/sqlite3-rtree" }
+sqlite3 = { path = "crates/sqlite3" }

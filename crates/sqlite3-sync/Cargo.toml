@@ -1,0 +1,10 @@
+[package]
+name = "sqlite3-sync"
+description = "SQLite3-rs: mutex, condvar, and atomic wrappers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+parking_lot.workspace = true
+thiserror.workspace = true

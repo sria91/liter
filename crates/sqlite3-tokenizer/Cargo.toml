@@ -1,0 +1,10 @@
+[package]
+name = "sqlite3-tokenizer"
+description = "SQLite3-rs: SQL tokenizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+logos.workspace = true

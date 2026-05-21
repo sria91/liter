@@ -1,0 +1,11 @@
+[package]
+name = "sqlite3-resolve"
+description = "SQLite3-rs: name resolution and type affinity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sqlite3-ast = { path = "../sqlite3-ast" }
+sqlite3-schema = { path = "../sqlite3-schema" }
+thiserror.workspace = true

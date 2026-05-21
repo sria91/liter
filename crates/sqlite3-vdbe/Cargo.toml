@@ -1,0 +1,10 @@
+[package]
+name = "sqlite3-vdbe"
+description = "SQLite3-rs: Virtual Database Engine (bytecode VM)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sqlite3-record = { path = "../sqlite3-record" }
+thiserror.workspace = true

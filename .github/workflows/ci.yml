@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "dev/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Primary test matrix ────────────────────────────────────────────────────
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace --all-features
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: cargo fmt check
+        run: cargo fmt --all -- --check
+
+  # ── Miri (UB detection) ───────────────────────────────────────────────────
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@v2
+      - name: miri test (alloc)
+        run: cargo +nightly miri test -p sqlite3-alloc
+      - name: miri test (unicode)
+        run: cargo +nightly miri test -p sqlite3-unicode
+      - name: miri test (record)
+        run: cargo +nightly miri test -p sqlite3-record
+
+  # ── Fuzzing (short CI run) ────────────────────────────────────────────────
+  fuzz:
+    name: Fuzz (5 min)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz tokenizer
+        run: cargo fuzz run fuzz_tokenizer -- -max_total_time=120
+      - name: Fuzz parser
+        run: cargo fuzz run fuzz_parser -- -max_total_time=120
+      - name: Fuzz full_db
+        run: cargo fuzz run fuzz_full_db -- -max_total_time=60
+
+  # ── Benchmarks ────────────────────────────────────────────────────────────
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run criterion benchmarks
+        run: cargo bench --package benches 2>&1 | tee bench-results.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-results.txt
+
+  # ── TCL test suite ────────────────────────────────────────────────────────
+  tcl-suite:
+    name: TCL Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tclsh
+        run: sudo apt-get install -y tcl
+      - name: Run TCL suite tests
+        run: cargo test --package tcl-suite -- --include-ignored --nocapture
+
+  # ── Security audit ────────────────────────────────────────────────────────
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit
+
+  # ── Code coverage ─────────────────────────────────────────────────────────
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Generate coverage report
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false

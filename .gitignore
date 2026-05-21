@@ -1,0 +1,7 @@
+/target
+/fuzz/target
+**/*.orig
+*.db-journal
+*.db-wal
+*.db-shm
+/Cargo.lock

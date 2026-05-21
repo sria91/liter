@@ -1,0 +1,13 @@
+[package]
+name = "sqlite3-btree"
+description = "SQLite3-rs: B-tree read/write/cursor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sqlite3-pager = { path = "../sqlite3-pager" }
+sqlite3-vfs = { path = "../sqlite3-vfs" }
+thiserror.workspace = true
+arrayvec.workspace = true
+parking_lot.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "sqlite3-ast"
+description = "SQLite3-rs: AST node types and schema representation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
