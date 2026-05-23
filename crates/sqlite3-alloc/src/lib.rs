@@ -33,40 +33,92 @@ pub unsafe trait SqliteAlloc: Send + Sync {
 }
 
 /// Default allocator that delegates to the global Rust allocator.
+///
+/// Each allocation is prefixed by an 8-byte header containing the usable size,
+/// which lets `free`, `realloc`, and `size` recover the `Layout` without any
+/// external bookkeeping.
+///
+/// Memory layout of each allocation:
+/// ```text
+/// [ usize (8 bytes) | ... n bytes of usable data ... ]
+///  ^raw              ^returned pointer
+/// ```
 pub struct SystemAlloc;
+
+/// Alignment used for all `SystemAlloc` allocations.
+const ALIGN: usize = 8;
+/// Size of the bookkeeping header prepended to every allocation.
+const HEADER: usize = std::mem::size_of::<usize>(); // 8 bytes on 64-bit
 
 unsafe impl SqliteAlloc for SystemAlloc {
     fn malloc(&self, n: usize) -> *mut u8 {
         if n == 0 {
             return core::ptr::null_mut();
         }
-        // SAFETY: layout is valid because n > 0 and align is 1.
-        let layout = std::alloc::Layout::from_size_align(n, 8).expect("invalid layout");
-        unsafe { std::alloc::alloc(layout) }
+        let total = n + HEADER;
+        // SAFETY: total > 0 and ALIGN is a valid power-of-two alignment.
+        let layout = match std::alloc::Layout::from_size_align(total, ALIGN) {
+            Ok(l) => l,
+            Err(_) => return core::ptr::null_mut(),
+        };
+        unsafe {
+            let raw = std::alloc::alloc(layout);
+            if raw.is_null() {
+                return raw;
+            }
+            // Store usable size in header.
+            (raw as *mut usize).write(n);
+            raw.add(HEADER)
+        }
     }
 
     fn free(&self, ptr: *mut u8) {
         if ptr.is_null() {
             return;
         }
-        // SAFETY: caller must have obtained ptr from malloc/realloc with the
-        // same allocator. We store the size in the 8-byte header — but for the
-        // system allocator we cannot recover layout without storing it.
-        // This stub panics to flag the unimplemented path.
-        unimplemented!("SystemAlloc::free requires size tracking — use the tracking wrapper")
+        unsafe {
+            // SAFETY: ptr was obtained from SystemAlloc::malloc; the header
+            // immediately precedes it and contains the original usable size.
+            let raw = ptr.sub(HEADER);
+            let n = (raw as *const usize).read();
+            let layout = std::alloc::Layout::from_size_align_unchecked(n + HEADER, ALIGN);
+            std::alloc::dealloc(raw, layout);
+        }
     }
 
-    fn realloc(&self, _ptr: *mut u8, _n: usize) -> *mut u8 {
-        unimplemented!("SystemAlloc::realloc requires size tracking — use the tracking wrapper")
+    fn realloc(&self, ptr: *mut u8, n: usize) -> *mut u8 {
+        if ptr.is_null() {
+            return self.malloc(n);
+        }
+        if n == 0 {
+            self.free(ptr);
+            return core::ptr::null_mut();
+        }
+        unsafe {
+            // SAFETY: same invariant as free.
+            let raw = ptr.sub(HEADER);
+            let old_n = (raw as *const usize).read();
+            let old_layout = std::alloc::Layout::from_size_align_unchecked(old_n + HEADER, ALIGN);
+            let new_total = n + HEADER;
+            let new_raw = std::alloc::realloc(raw, old_layout, new_total);
+            if new_raw.is_null() {
+                return new_raw;
+            }
+            (new_raw as *mut usize).write(n);
+            new_raw.add(HEADER)
+        }
     }
 
-    fn size(&self, _ptr: *mut u8) -> usize {
-        unimplemented!("SystemAlloc::size requires size tracking")
+    fn size(&self, ptr: *mut u8) -> usize {
+        if ptr.is_null() {
+            return 0;
+        }
+        // SAFETY: header immediately precedes ptr.
+        unsafe { (ptr.sub(HEADER) as *const usize).read() }
     }
 
     fn roundup(&self, n: usize) -> usize {
-        // Round up to 8-byte boundary.
-        (n + 7) & !7
+        (n + ALIGN - 1) & !(ALIGN - 1)
     }
 
     fn init(&self) -> Result<(), AllocError> {
@@ -136,6 +188,46 @@ unsafe impl<const N: usize> SqliteAlloc for StaticAlloc<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_alloc_malloc_free() {
+        let a = SystemAlloc;
+        let p = a.malloc(64);
+        assert!(!p.is_null());
+        assert_eq!(a.size(p), 64);
+        a.free(p);
+    }
+
+    #[test]
+    fn system_alloc_realloc() {
+        let a = SystemAlloc;
+        let p = a.malloc(32);
+        assert!(!p.is_null());
+        let p2 = a.realloc(p, 128);
+        assert!(!p2.is_null());
+        assert_eq!(a.size(p2), 128);
+        a.free(p2);
+    }
+
+    #[test]
+    fn system_alloc_roundup() {
+        let a = SystemAlloc;
+        assert_eq!(a.roundup(1), 8);
+        assert_eq!(a.roundup(8), 8);
+        assert_eq!(a.roundup(9), 16);
+    }
+
+    #[test]
+    fn system_alloc_null_cases() {
+        let a = SystemAlloc;
+        assert!(a.malloc(0).is_null());
+        a.free(core::ptr::null_mut()); // must not panic
+        assert_eq!(a.size(core::ptr::null_mut()), 0);
+        // realloc(null, n) == malloc(n)
+        let p = a.realloc(core::ptr::null_mut(), 16);
+        assert!(!p.is_null());
+        a.free(p);
+    }
 
     #[test]
     fn static_alloc_basic() {

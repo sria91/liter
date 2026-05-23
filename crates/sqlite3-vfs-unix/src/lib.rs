@@ -2,12 +2,28 @@
 //!
 //! Mirrors `os_unix.c`. Uses POSIX advisory locks (`fcntl F_SETLK/F_GETLK`)
 //! for file locking semantics compatible with the C SQLite implementation.
+//!
+//! ## Lock byte layout (matches SQLite)
+//! ```text
+//! PENDING_BYTE   = 0x40000000  (byte 1073741824)
+//! RESERVED_BYTE  = 0x40000001
+//! SHARED_FIRST   = 0x40000002
+//! SHARED_SIZE    = 510
+//! ```
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use sqlite3_vfs::{AccessFlags, DeviceCharacteristics, LockLevel, OpenFlags, SyncFlags, Vfs, VfsFile};
+use sqlite3_vfs::{
+    AccessFlags, DeviceCharacteristics, LockLevel, OpenFlags, SyncFlags, Vfs, VfsFile,
+};
+
+/// SQLite lock-byte region offsets (must match C SQLite exactly).
+const PENDING_BYTE: i64 = 0x40000000;
+const RESERVED_BYTE: i64 = PENDING_BYTE + 1;
+const SHARED_FIRST: i64 = PENDING_BYTE + 2;
+const SHARED_SIZE: i64 = 510;
 
 pub struct UnixFile {
     file: File,
@@ -50,18 +66,74 @@ impl VfsFile for UnixFile {
     }
 
     fn lock(&mut self, level: LockLevel) -> io::Result<()> {
-        // TODO: implement POSIX fcntl advisory locking.
+        if level <= self.lock {
+            return Ok(()); // Already have equal or stronger lock.
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = self.file.as_raw_fd();
+            match level {
+                LockLevel::Shared => {
+                    // Read lock on a random byte in the shared range.
+                    fcntl_lock(fd, libc::F_RDLCK, SHARED_FIRST, 1)?;
+                }
+                LockLevel::Reserved => {
+                    // Write lock on the reserved byte.
+                    fcntl_lock(fd, libc::F_WRLCK, RESERVED_BYTE, 1)?;
+                }
+                LockLevel::Pending => {
+                    // Write lock on the pending byte.
+                    fcntl_lock(fd, libc::F_WRLCK, PENDING_BYTE, 1)?;
+                }
+                LockLevel::Exclusive => {
+                    // Write lock over the entire shared range.
+                    fcntl_lock(fd, libc::F_WRLCK, SHARED_FIRST, SHARED_SIZE)?;
+                }
+                LockLevel::None => {}
+            }
+        }
         self.lock = level;
         Ok(())
     }
 
     fn unlock(&mut self, level: LockLevel) -> io::Result<()> {
+        if level >= self.lock {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = self.file.as_raw_fd();
+            if self.lock >= LockLevel::Exclusive && level < LockLevel::Exclusive {
+                fcntl_lock(fd, libc::F_UNLCK, SHARED_FIRST, SHARED_SIZE)?;
+                if level >= LockLevel::Shared {
+                    // Re-acquire shared lock after dropping exclusive.
+                    fcntl_lock(fd, libc::F_RDLCK, SHARED_FIRST, 1)?;
+                }
+            }
+            if self.lock >= LockLevel::Reserved && level < LockLevel::Reserved {
+                fcntl_lock(fd, libc::F_UNLCK, RESERVED_BYTE, 1)?;
+            }
+            if self.lock >= LockLevel::Pending && level < LockLevel::Pending {
+                fcntl_lock(fd, libc::F_UNLCK, PENDING_BYTE, 1)?;
+            }
+            if self.lock >= LockLevel::Shared && level < LockLevel::Shared {
+                fcntl_lock(fd, libc::F_UNLCK, SHARED_FIRST, 1)?;
+            }
+        }
         self.lock = level;
         Ok(())
     }
 
     fn check_reserved_lock(&self) -> io::Result<bool> {
-        // TODO: query the OS for a conflicting reserved lock from another process.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = self.file.as_raw_fd();
+            return fcntl_has_lock(fd, libc::F_WRLCK, RESERVED_BYTE, 1);
+        }
+        #[allow(unreachable_code)]
         Ok(false)
     }
 
@@ -71,6 +143,54 @@ impl VfsFile for UnixFile {
 
     fn sector_size(&self) -> u32 {
         4096
+    }
+}
+
+/// Apply an `fcntl` lock/unlock to a byte range.
+#[cfg(unix)]
+fn fcntl_lock(
+    fd: std::os::unix::io::RawFd,
+    lock_type: libc::c_short,
+    start: i64,
+    len: i64,
+) -> io::Result<()> {
+    let flock = libc::flock {
+        l_type: lock_type,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: start as libc::off_t,
+        l_len: len as libc::off_t,
+        l_pid: 0,
+    };
+    // SAFETY: fd is a valid file descriptor; flock is initialised above.
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETLK, &flock) };
+    if rc == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Check whether another process holds a conflicting lock on a byte range.
+#[cfg(unix)]
+fn fcntl_has_lock(
+    fd: std::os::unix::io::RawFd,
+    lock_type: libc::c_short,
+    start: i64,
+    len: i64,
+) -> io::Result<bool> {
+    let mut flock = libc::flock {
+        l_type: lock_type,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: start as libc::off_t,
+        l_len: len as libc::off_t,
+        l_pid: 0,
+    };
+    // SAFETY: fd and flock are valid.
+    let rc = unsafe { libc::fcntl(fd, libc::F_GETLK, &mut flock) };
+    if rc == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(flock.l_type != libc::F_UNLCK as libc::c_short)
     }
 }
 
@@ -86,7 +206,10 @@ impl Vfs for UnixVfs {
             .write(!flags.contains(OpenFlags::READ_ONLY))
             .create(flags.contains(OpenFlags::CREATE))
             .open(path)?;
-        Ok(UnixFile { file, lock: LockLevel::None })
+        Ok(UnixFile {
+            file,
+            lock: LockLevel::None,
+        })
     }
 
     fn delete(&self, path: &Path, sync_dir: bool) -> io::Result<()> {

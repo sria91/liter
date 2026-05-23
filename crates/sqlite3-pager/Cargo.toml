@@ -11,3 +11,7 @@ sqlite3-alloc = { path = "../sqlite3-alloc" }
 sqlite3-sync = { path = "../sqlite3-sync" }
 thiserror.workspace = true
 parking_lot.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
