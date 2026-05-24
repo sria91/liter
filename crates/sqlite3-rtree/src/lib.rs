@@ -6,6 +6,20 @@
 //! ## Status
 //! Phase 3 — not yet implemented.
 
-pub fn rtree_enabled() -> bool {
-    false
+/// An R*Tree Virtual Table.
+///
+/// In a full implementation, this table manages auxiliary B-Tree pages containing
+/// spatial node indices (min/max bounds for multiple dimensions).
+pub struct RTreeTable {
+    pub name: String,
+    pub dimensions: usize,
+}
+
+impl RTreeTable {
+    pub fn new(name: &str, dimensions: usize) -> Self {
+        Self {
+            name: name.to_string(),
+            dimensions,
+        }
+    }
 }

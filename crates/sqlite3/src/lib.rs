@@ -27,6 +27,27 @@ use std::path::Path;
 
 pub use sqlite3_record::Value;
 
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+use wasm_bindgen::prelude::*;
+
+#[cfg_attr(all(feature = "wasm", target_arch = "wasm32"), wasm_bindgen)]
+pub struct WasmConnection {
+    // We keep a standard Connection inside to provide basic API bindings
+    #[allow(dead_code)]
+    conn: Connection,
+}
+
+#[cfg_attr(all(feature = "wasm", target_arch = "wasm32"), wasm_bindgen)]
+impl WasmConnection {
+    #[cfg_attr(all(feature = "wasm", target_arch = "wasm32"), wasm_bindgen(constructor))]
+    pub fn new() -> Result<WasmConnection, String> {
+        match Connection::open_in_memory() {
+            Ok(conn) => Ok(Self { conn }),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
 /// Top-level error type for sqlite3-rs.
 #[derive(Debug, thiserror::Error)]
 pub enum SqliteError {

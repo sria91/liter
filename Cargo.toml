@@ -32,7 +32,7 @@ members = [
     "tests/differential",
     "tests/format_compat",
     "tests/tcl_suite",
-    "tests/oom",
+    "tests/oom", "crates/sqlite3-session",
 ]
 
 [workspace.package]
