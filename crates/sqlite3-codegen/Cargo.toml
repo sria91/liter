@@ -14,3 +14,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 sqlite3-parser = { path = "../sqlite3-parser" }
+sqlite3-btree = { path = "../sqlite3-btree" }

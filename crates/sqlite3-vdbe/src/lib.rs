@@ -6,6 +6,7 @@
 //! ## Status
 //! Phase 3 — type definitions and VM skeleton only.
 
+use sqlite3_btree::{BTree, BTreeCursor, PageKind};
 use std::sync::Arc;
 
 /// A VDBE register value.
@@ -51,6 +52,10 @@ pub enum VdbeError {
     Constraint(String),
     #[error("not yet implemented")]
     NotImplemented,
+    #[error("btree error: {0}")]
+    BTree(#[from] sqlite3_btree::BTreeError),
+    #[error("record error: {0}")]
+    Record(#[from] sqlite3_record::RecordError),
 }
 
 pub type VdbeResult<T> = Result<T, VdbeError>;
@@ -136,6 +141,9 @@ pub enum Opcode {
     InsertInt,
     Delete,
     RowId,
+    NewRowid,
+    // Schema
+    CreateTable,
     // Result output
     ResultRow,
     // Aggregation
@@ -171,6 +179,14 @@ pub struct Vdbe {
     halted: bool,
     /// Holds the range of registers returned by the last ResultRow.
     last_result_row: Option<(usize, usize)>,
+    /// Number of cursors required by this program.
+    pub n_cursors: usize,
+}
+
+impl Default for Vdbe {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Vdbe {
@@ -183,6 +199,7 @@ impl Vdbe {
             call_stack: Vec::new(),
             halted: false,
             last_result_row: None,
+            n_cursors: 0,
         }
     }
 
@@ -194,6 +211,7 @@ impl Vdbe {
             call_stack: Vec::new(),
             halted: false,
             last_result_row: None,
+            n_cursors: 0,
         }
     }
 
@@ -220,7 +238,7 @@ impl Vdbe {
         addr
     }
 
-    pub fn step(&mut self) -> VdbeResult<StepResult> {
+    pub fn step<'a>(&mut self, btree: &'a BTree, cursors: &mut [Option<BTreeCursor<'a>>]) -> VdbeResult<StepResult> {
         if self.halted {
             return Ok(StepResult::Done);
         }
@@ -350,6 +368,84 @@ impl Vdbe {
                         if a >= b { self.pc = op.p2 as usize; }
                     }
                 }
+                Opcode::CreateTable => {
+                    let pgno = btree.allocate_page(PageKind::TableLeaf)?;
+                    self.regs[op.p2 as usize] = Mem::Int(pgno as i64);
+                }
+                Opcode::OpenWrite => {
+                    let cursor_idx = op.p1 as usize;
+                    let root_page = op.p2 as u32;
+                    if cursor_idx >= cursors.len() {
+                        return Err(VdbeError::Exec("cursor index out of bounds".to_string()));
+                    }
+                    cursors[cursor_idx] = Some(btree.cursor(root_page, true)?);
+                }
+                Opcode::NewRowid => {
+                    let cursor_idx = op.p1 as usize;
+                    let dest_reg = op.p2 as usize;
+                    if let Some(cursor) = &mut cursors[cursor_idx] {
+                        let max_rowid = if cursor.move_to_last()? {
+                            let k = cursor.key()?;
+                            u64::from_be_bytes(k.try_into().unwrap())
+                        } else {
+                            0
+                        };
+                        self.regs[dest_reg] = Mem::Int((max_rowid + 1) as i64);
+                    } else {
+                        return Err(VdbeError::Exec("invalid cursor".to_string()));
+                    }
+                }
+                Opcode::MakeRecord => {
+                    let start_reg = op.p1 as usize;
+                    let count = op.p2 as usize;
+                    let dest_reg = op.p3 as usize;
+
+                    let mut values = Vec::with_capacity(count);
+                    for i in 0..count {
+                        let mem = &self.regs[start_reg + i];
+                        let val = match mem {
+                            Mem::Null => sqlite3_record::Value::Null,
+                            Mem::Int(v) => sqlite3_record::Value::Int(*v),
+                            Mem::Real(v) => sqlite3_record::Value::Real(*v),
+                            Mem::Text(v) => sqlite3_record::Value::Text(v.as_bytes().to_vec()),
+                            Mem::Blob(v) => sqlite3_record::Value::Blob(v.to_vec()),
+                            Mem::ZeroBlob(n) => sqlite3_record::Value::ZeroBlob(*n),
+                        };
+                        values.push(val);
+                    }
+
+                    let record = sqlite3_record::encode_record(&values)?;
+                    self.regs[dest_reg] = Mem::Blob(Arc::from(record.into_boxed_slice()));
+                }
+                Opcode::Insert => {
+                    let cursor_idx = op.p1 as usize;
+                    let record_reg = op.p2 as usize;
+                    let rowid_reg = op.p3 as usize;
+
+                    let rowid = if let Mem::Int(i) = self.regs[rowid_reg] {
+                        i as u64
+                    } else {
+                        return Err(VdbeError::Exec("rowid must be integer".to_string()));
+                    };
+
+                    let record = if let Mem::Blob(b) = &self.regs[record_reg] {
+                        b.clone()
+                    } else {
+                        return Err(VdbeError::Exec("record must be blob".to_string()));
+                    };
+
+                    if let Some(cursor) = &mut cursors[cursor_idx] {
+                        cursor.insert(&rowid.to_be_bytes(), &record, false)?;
+                    } else {
+                        return Err(VdbeError::Exec("invalid cursor".to_string()));
+                    }
+                }
+                Opcode::Close => {
+                    let cursor_idx = op.p1 as usize;
+                    if cursor_idx < cursors.len() {
+                        cursors[cursor_idx] = None;
+                    }
+                }
                 Opcode::ResultRow => {
                     self.last_result_row = Some((op.p1 as usize, op.p2 as usize));
                     return Ok(StepResult::Row);
@@ -374,11 +470,7 @@ impl Vdbe {
     }
 }
 
-impl Default for Vdbe {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+
 
 #[cfg(test)]
 mod tests {

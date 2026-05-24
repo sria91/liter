@@ -89,6 +89,12 @@ impl From<sqlite3_vdbe::VdbeError> for SqliteError {
     }
 }
 
+impl From<sqlite3_btree::BTreeError> for SqliteError {
+    fn from(e: sqlite3_btree::BTreeError) -> Self {
+        SqliteError::Sql(format!("btree error: {}", e))
+    }
+}
+
 pub type SqliteResult<T> = Result<T, SqliteError>;
 
 /// An open database connection.
@@ -96,14 +102,24 @@ pub type SqliteResult<T> = Result<T, SqliteError>;
 /// `Connection` is `Send` but not `Sync` (mirrors C SQLite `SQLITE_THREADSAFE=1`).
 pub struct Connection {
     path: String,
-    // pager, schema, prepared_stmts, ... — wired in Phase 2+
+    pub btree: sqlite3_btree::BTree,
+    pub schema: sqlite3_schema::Schema,
 }
 
 impl Connection {
     /// Open a database at the given path.
     /// Use `":memory:"` for an in-memory database.
     pub fn open(path: &str) -> SqliteResult<Self> {
-        Ok(Self { path: path.to_owned() })
+        let btree = if path == ":memory:" {
+            sqlite3_btree::BTree::new_in_memory()
+        } else {
+            sqlite3_btree::BTree::open(Path::new(path), false)?
+        };
+        Ok(Self { 
+            path: path.to_owned(),
+            btree,
+            schema: sqlite3_schema::Schema::new(),
+        })
     }
 
     /// Open an in-memory database.
@@ -113,9 +129,65 @@ impl Connection {
 
     /// Execute a SQL statement, discarding any result rows.
     pub fn execute(&self, sql: &str, params: impl IntoParams) -> SqliteResult<u64> {
-        // Run query and just discard the rows, returning 0 for now.
-        // In a full implementation, this would return the number of rows modified.
-        let _ = self.query(sql, params)?;
+        let ast = sqlite3_parser::parse_stmt(sql)?;
+        let is_create = matches!(&ast, sqlite3_ast::Stmt::Create(_));
+        let mut vm = sqlite3_codegen::compile_with_schema(&ast, &self.schema)?;
+
+        self.btree.begin_write()?;
+        
+        let mut cursors: Vec<Option<sqlite3_btree::BTreeCursor>> = Vec::with_capacity(vm.n_cursors);
+        for _ in 0..vm.n_cursors { cursors.push(None); }
+
+        let mut root_page = None;
+
+        let res = (|| -> SqliteResult<()> {
+            loop {
+                match vm.step(&self.btree, &mut cursors)? {
+                    sqlite3_vdbe::StepResult::Row => {
+                        if is_create {
+                            if let Some(row) = vm.current_result_row() {
+                                if let Some(pgno) = row[0].to_int() {
+                                    root_page = Some(pgno as u32);
+                                }
+                            }
+                        }
+                    }
+                    sqlite3_vdbe::StepResult::Done => break,
+                }
+            }
+            Ok(())
+        })();
+
+        if res.is_err() {
+            let _ = self.btree.rollback();
+            return Err(res.unwrap_err());
+        }
+
+        self.btree.commit()?;
+
+        // If it was a CREATE TABLE statement, insert into the schema catalog.
+        if is_create {
+            if let Some(rp) = root_page {
+                if let sqlite3_ast::Stmt::Create(create_stmt) = ast {
+                    if let sqlite3_ast::CreateStmt::Table(create_table) = *create_stmt {
+                        let columns = match create_table.body {
+                            sqlite3_ast::CreateTableBody::Columns { columns, .. } => columns,
+                            _ => Vec::new(),
+                        };
+
+                        self.schema.insert(sqlite3_schema::SchemaObject {
+                            kind: sqlite3_schema::ObjectKind::Table,
+                            name: create_table.name.clone(),
+                            tbl_name: create_table.name.clone(),
+                            root_page: rp,
+                            sql: Some(sql.to_owned()),
+                            columns,
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(0)
     }
 
@@ -125,11 +197,13 @@ impl Connection {
         
         let mut results = Vec::new();
 
-        // Right now our AST root is a single Stmt. In the future it will be a list.
-        let mut vm = sqlite3_codegen::compile(&ast)?;
+        let mut vm = sqlite3_codegen::compile_with_schema(&ast, &self.schema)?;
+
+        let mut cursors: Vec<Option<sqlite3_btree::BTreeCursor>> = Vec::with_capacity(vm.n_cursors);
+        for _ in 0..vm.n_cursors { cursors.push(None); }
 
         loop {
-            match vm.step()? {
+            match vm.step(&self.btree, &mut cursors)? {
                 sqlite3_vdbe::StepResult::Row => {
                     if let Some(row) = vm.current_result_row() {
                         let mut out_row = Vec::with_capacity(row.len());
@@ -284,6 +358,28 @@ mod tests {
         assert_eq!(rows[0][0], Value::Int(42));
         assert_eq!(rows[0][1], Value::Text(b"hello".to_vec()));
         assert_eq!(rows[0][2], Value::Real(3.14));
+    }
+
+    #[test]
+    fn test_create_table_and_insert() {
+        let conn = Connection::open_in_memory().unwrap();
+        
+        // Create table
+        let res = conn.execute("CREATE TABLE users (id INTEGER, name TEXT);", [] as [(); 0]);
+        assert!(res.is_ok(), "CREATE TABLE failed: {:?}", res.err());
+
+        // Verify it was added to schema
+        let tables = conn.schema.tables();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "users");
+        
+        // Insert a row
+        let res = conn.execute("INSERT INTO users VALUES (1, 'alice');", [] as [(); 0]);
+        assert!(res.is_ok(), "INSERT failed: {:?}", res.err());
+        
+        // Insert another row
+        let res = conn.execute("INSERT INTO users VALUES (2, 'bob');", [] as [(); 0]);
+        assert!(res.is_ok(), "INSERT failed: {:?}", res.err());
     }
 
     #[test]

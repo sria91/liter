@@ -7,34 +7,39 @@ use sqlite3_ast::*;
 use sqlite3_vdbe::{Opcode, P4, Vdbe, VdbeOp};
 use std::sync::Arc;
 
+use sqlite3_schema::Schema;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CodegenError {
     #[error("not yet implemented")]
     NotImplemented,
     #[error("internal codegen error: {0}")]
     Internal(String),
+    #[error("schema error: {0}")]
+    Schema(String),
 }
 
 pub type CodegenResult<T> = Result<T, CodegenError>;
 
-pub struct Compiler {
+pub struct Compiler<'a> {
     vm: Vdbe,
+    schema: Option<&'a Schema>,
 }
 
-impl Default for Compiler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Compiler {
+impl<'a> Compiler<'a> {
     pub fn new() -> Self {
-        Self { vm: Vdbe::new() }
+        Self { vm: Vdbe::new(), schema: None }
+    }
+
+    pub fn with_schema(schema: &'a Schema) -> Self {
+        Self { vm: Vdbe::new(), schema: Some(schema) }
     }
 
     pub fn compile(mut self, stmt: &Stmt) -> CodegenResult<Vdbe> {
         match stmt {
             Stmt::Select(select) => self.compile_select(select)?,
+            Stmt::Create(create) => self.compile_create(create)?,
+            Stmt::Insert(insert) => self.compile_insert(insert)?,
             _ => return Err(CodegenError::NotImplemented),
         }
         
@@ -90,6 +95,106 @@ impl Compiler {
             opcode: Opcode::ResultRow,
             p1: result_reg_start as i32,
             p2: num_cols as i32,
+            p3: 0,
+            p4: P4::None,
+            p5: 0,
+        });
+
+        Ok(())
+    }
+
+    fn compile_create(&mut self, _create: &CreateStmt) -> CodegenResult<()> {
+        let dest_reg = self.vm.alloc_reg();
+        self.vm.emit(VdbeOp {
+            opcode: Opcode::CreateTable,
+            p1: 0,
+            p2: dest_reg as i32,
+            p3: 0,
+            p4: P4::None,
+            p5: 0,
+        });
+        
+        self.vm.emit(VdbeOp {
+            opcode: Opcode::ResultRow,
+            p1: dest_reg as i32,
+            p2: 1,
+            p3: 0,
+            p4: P4::None,
+            p5: 0,
+        });
+
+        Ok(())
+    }
+
+    fn compile_insert(&mut self, insert: &InsertStmt) -> CodegenResult<()> {
+        let schema = self.schema.ok_or_else(|| CodegenError::Schema("No schema provided".to_string()))?;
+        let table_name = &insert.table;
+        let table = schema.get(table_name).ok_or_else(|| CodegenError::Schema(format!("Table not found: {}", table_name)))?;
+        
+        let root_page = table.root_page as i32;
+
+        let cursor_id = self.vm.n_cursors;
+        self.vm.n_cursors += 1;
+
+        self.vm.emit(VdbeOp {
+            opcode: Opcode::OpenWrite,
+            p1: cursor_id as i32,
+            p2: root_page,
+            p3: 0,
+            p4: P4::None,
+            p5: 0,
+        });
+
+        if let InsertSource::Values(values_list) = &insert.source {
+            for values in values_list {
+                let mut regs = Vec::new();
+                for expr in values {
+                    let reg = self.compile_expr(expr)?;
+                    regs.push(reg);
+                }
+
+                if regs.is_empty() { continue; }
+
+                let start_reg = regs[0];
+                let count = regs.len();
+                let record_reg = self.vm.alloc_reg();
+                
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::MakeRecord,
+                    p1: start_reg as i32,
+                    p2: count as i32,
+                    p3: record_reg as i32,
+                    p4: P4::None,
+                    p5: 0,
+                });
+
+                let rowid_reg = self.vm.alloc_reg();
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::NewRowid,
+                    p1: cursor_id as i32,
+                    p2: rowid_reg as i32,
+                    p3: 0,
+                    p4: P4::None,
+                    p5: 0,
+                });
+
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::Insert,
+                    p1: cursor_id as i32,
+                    p2: record_reg as i32,
+                    p3: rowid_reg as i32,
+                    p4: P4::None,
+                    p5: 0,
+                });
+            }
+        } else {
+            return Err(CodegenError::NotImplemented);
+        }
+
+        self.vm.emit(VdbeOp {
+            opcode: Opcode::Close,
+            p1: cursor_id as i32,
+            p2: 0,
             p3: 0,
             p4: P4::None,
             p5: 0,
@@ -216,5 +321,10 @@ impl Compiler {
 
 pub fn compile(stmt: &Stmt) -> CodegenResult<Vdbe> {
     let compiler = Compiler::new();
+    compiler.compile(stmt)
+}
+
+pub fn compile_with_schema(stmt: &Stmt, schema: &Schema) -> CodegenResult<Vdbe> {
+    let compiler = Compiler::with_schema(schema);
     compiler.compile(stmt)
 }

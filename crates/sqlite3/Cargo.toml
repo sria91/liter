@@ -15,6 +15,7 @@ sqlite3-pager = { path = "../sqlite3-pager" }
 sqlite3-btree = { path = "../sqlite3-btree" }
 sqlite3-record = { path = "../sqlite3-record" }
 sqlite3-schema = { path = "../sqlite3-schema" }
+sqlite3-ast = { path = "../sqlite3-ast" }
 sqlite3-tokenizer = { path = "../sqlite3-tokenizer" }
 sqlite3-parser = { path = "../sqlite3-parser" }
 sqlite3-codegen = { path = "../sqlite3-codegen" }

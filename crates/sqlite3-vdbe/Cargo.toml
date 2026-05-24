@@ -7,4 +7,5 @@ license.workspace = true
 
 [dependencies]
 sqlite3-record = { path = "../sqlite3-record" }
+sqlite3-btree = { path = "../sqlite3-btree" }
 thiserror.workspace = true

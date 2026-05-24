@@ -193,6 +193,107 @@ pub fn decode_record(buf: &[u8]) -> RecordResult<Vec<Value>> {
     Ok(values)
 }
 
+/// Encode a full record into `buf`.
+pub fn encode_record(values: &[Value]) -> RecordResult<Vec<u8>> {
+    let mut header = Vec::new();
+    let mut payload = Vec::new();
+
+    for val in values {
+        match val {
+            Value::Null => {
+                let mut tmp = [0u8; 9];
+                let n = encode_varint(0, &mut tmp)?;
+                header.extend_from_slice(&tmp[..n]);
+            }
+            Value::Int(i) => {
+                let i = *i;
+                if i == 0 {
+                    let mut tmp = [0u8; 9];
+                    let n = encode_varint(8, &mut tmp)?;
+                    header.extend_from_slice(&tmp[..n]);
+                } else if i == 1 {
+                    let mut tmp = [0u8; 9];
+                    let n = encode_varint(9, &mut tmp)?;
+                    header.extend_from_slice(&tmp[..n]);
+                } else if i >= i8::MIN as i64 && i <= i8::MAX as i64 {
+                    let mut tmp = [0u8; 9];
+                    let n = encode_varint(1, &mut tmp)?;
+                    header.extend_from_slice(&tmp[..n]);
+                    payload.push(i as i8 as u8);
+                } else if i >= i16::MIN as i64 && i <= i16::MAX as i64 {
+                    let mut tmp = [0u8; 9];
+                    let n = encode_varint(2, &mut tmp)?;
+                    header.extend_from_slice(&tmp[..n]);
+                    payload.extend_from_slice(&(i as i16).to_be_bytes());
+                } else if i >= -8388608 && i <= 8388607 { // 24-bit
+                    let mut tmp = [0u8; 9];
+                    let n = encode_varint(3, &mut tmp)?;
+                    header.extend_from_slice(&tmp[..n]);
+                    let bytes = (i as i32).to_be_bytes();
+                    payload.extend_from_slice(&bytes[1..4]);
+                } else if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+                    let mut tmp = [0u8; 9];
+                    let n = encode_varint(4, &mut tmp)?;
+                    header.extend_from_slice(&tmp[..n]);
+                    payload.extend_from_slice(&(i as i32).to_be_bytes());
+                } else if i >= -140737488355328 && i <= 140737488355327 { // 48-bit
+                    let mut tmp = [0u8; 9];
+                    let n = encode_varint(5, &mut tmp)?;
+                    header.extend_from_slice(&tmp[..n]);
+                    let bytes = i.to_be_bytes();
+                    payload.extend_from_slice(&bytes[2..8]);
+                } else {
+                    let mut tmp = [0u8; 9];
+                    let n = encode_varint(6, &mut tmp)?;
+                    header.extend_from_slice(&tmp[..n]);
+                    payload.extend_from_slice(&i.to_be_bytes());
+                }
+            }
+            Value::Real(f) => {
+                let mut tmp = [0u8; 9];
+                let n = encode_varint(7, &mut tmp)?;
+                header.extend_from_slice(&tmp[..n]);
+                payload.extend_from_slice(&f.to_be_bytes());
+            }
+            Value::Blob(b) => {
+                let st = (b.len() * 2 + 12) as u64;
+                let mut tmp = [0u8; 9];
+                let n = encode_varint(st, &mut tmp)?;
+                header.extend_from_slice(&tmp[..n]);
+                payload.extend_from_slice(b);
+            }
+            Value::Text(t) => {
+                let st = (t.len() * 2 + 13) as u64;
+                let mut tmp = [0u8; 9];
+                let n = encode_varint(st, &mut tmp)?;
+                header.extend_from_slice(&tmp[..n]);
+                payload.extend_from_slice(t);
+            }
+            Value::ZeroBlob(_) => {
+                return Err(RecordError::InvalidSerialType(0)); // Unsupported directly right now
+            }
+        }
+    }
+
+    // Header size includes the header_size varint itself
+    let mut header_size_varint = [0u8; 9];
+    let mut hs = header.len() as u64;
+    let mut n = encode_varint(hs, &mut header_size_varint)?;
+    
+    // Varint encoding might push the size over, iterate if necessary
+    while hs != (header.len() + n) as u64 {
+        hs = (header.len() + n) as u64;
+        n = encode_varint(hs, &mut header_size_varint)?;
+    }
+
+    let mut record = Vec::with_capacity(n + header.len() + payload.len());
+    record.extend_from_slice(&header_size_varint[..n]);
+    record.extend_from_slice(&header);
+    record.extend_from_slice(&payload);
+
+    Ok(record)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
