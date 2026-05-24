@@ -27,6 +27,7 @@ pub struct SchemaObject {
     pub tbl_name: String,
     pub root_page: u32,
     pub sql: Option<String>,
+    pub columns: Vec<sqlite3_ast::ColumnDef>,
 }
 
 /// The schema catalog for a single database (main, temp, or attached).
@@ -79,6 +80,13 @@ mod tests {
             tbl_name: name.to_owned(),
             root_page: 2,
             sql: Some(format!("CREATE TABLE {name} (id INTEGER PRIMARY KEY)")),
+            columns: vec![
+                sqlite3_ast::ColumnDef {
+                    name: "id".to_string(),
+                    type_name: None,
+                    constraints: vec![],
+                }
+            ],
         }
     }
 
@@ -108,6 +116,7 @@ mod tests {
             tbl_name: "a".to_owned(),
             root_page: 3,
             sql: None,
+            columns: vec![],
         });
         assert_eq!(s.tables().len(), 1);
     }

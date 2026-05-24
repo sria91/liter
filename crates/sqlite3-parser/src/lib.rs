@@ -388,6 +388,12 @@ impl<'a> Parser<'a> {
                     name: id.to_string(),
                 })
             }
+            Some(Token::LParen) => {
+                self.consume()?;
+                let expr = self.parse_expr()?;
+                self.expect(Token::RParen)?;
+                Ok(expr)
+            }
             Some(tok) => Err(ParseError::SyntaxError(format!("{:?}", tok))),
             None => Err(ParseError::UnexpectedEof),
         }

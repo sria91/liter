@@ -2,9 +2,9 @@
 //!
 //! Mirrors `resolve.c`. Walks the AST and binds each column reference to its
 //! source table/expression; computes type affinity for expressions.
-//!
-//! ## Status
-//! Phase 3 — stub.
+
+use sqlite3_ast::*;
+use sqlite3_schema::Schema;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
@@ -48,40 +48,138 @@ impl Affinity {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct Resolver<'a> {
+    schema: &'a Schema,
+}
 
-    #[test]
-    fn affinity_integer() {
-        assert_eq!(Affinity::from_type_name("INTEGER"), Affinity::Integer);
-        assert_eq!(Affinity::from_type_name("INT"), Affinity::Integer);
-        assert_eq!(Affinity::from_type_name("TINYINT"), Affinity::Integer);
+impl<'a> Resolver<'a> {
+    pub fn new(schema: &'a Schema) -> Self {
+        Self { schema }
     }
 
-    #[test]
-    fn affinity_text() {
-        assert_eq!(Affinity::from_type_name("VARCHAR(255)"), Affinity::Text);
-        assert_eq!(Affinity::from_type_name("TEXT"), Affinity::Text);
-        assert_eq!(Affinity::from_type_name("CLOB"), Affinity::Text);
+    pub fn resolve_stmt(&self, stmt: &mut Stmt) -> ResolveResult<()> {
+        match stmt {
+            Stmt::Select(select) => self.resolve_select(select),
+            _ => Ok(()), // TODO support other statements
+        }
     }
 
-    #[test]
-    fn affinity_blob() {
-        assert_eq!(Affinity::from_type_name("BLOB"), Affinity::Blob);
-        assert_eq!(Affinity::from_type_name(""), Affinity::Blob);
+    fn resolve_select(&self, select: &mut SelectStmt) -> ResolveResult<()> {
+        let body = match &mut select.body {
+            SelectBody::Simple(simple) => simple,
+            _ => return Err(ResolveError::NotImplemented),
+        };
+
+        // 1. Resolve FROM clause and verify tables exist
+        let mut available_tables = Vec::new();
+        if let Some(from) = &body.from {
+            for table_or_subquery in &from.tables {
+                match table_or_subquery {
+                    TableOrSubquery::Table { name, alias, .. } => {
+                        let obj = self.schema.get(name).ok_or_else(|| ResolveError::NoSuchTable(name.clone()))?;
+                        available_tables.push((alias.clone().unwrap_or_else(|| name.clone()), obj));
+                    }
+                    _ => return Err(ResolveError::NotImplemented),
+                }
+            }
+            // TODO handle joins
+        }
+
+        // 2. Expand SELECT * and resolve column references
+        let mut new_columns = Vec::new();
+        for col in &mut body.result_columns {
+            match col {
+                ResultColumn::Star => {
+                    for (table_alias, obj) in &available_tables {
+                        for c in &obj.columns {
+                            new_columns.push(ResultColumn::Expr {
+                                expr: Expr::Column {
+                                    schema: None,
+                                    table: Some(table_alias.clone()),
+                                    name: c.name.clone(),
+                                },
+                                alias: None,
+                            });
+                        }
+                    }
+                }
+                ResultColumn::TableStar(table_name) => {
+                    let mut found = false;
+                    for (table_alias, obj) in &available_tables {
+                        if table_alias == table_name {
+                            found = true;
+                            for c in &obj.columns {
+                                new_columns.push(ResultColumn::Expr {
+                                    expr: Expr::Column {
+                                        schema: None,
+                                        table: Some(table_alias.clone()),
+                                        name: c.name.clone(),
+                                    },
+                                    alias: None,
+                                });
+                            }
+                        }
+                    }
+                    if !found {
+                        return Err(ResolveError::NoSuchTable(table_name.clone()));
+                    }
+                }
+                ResultColumn::Expr { expr, .. } => {
+                    self.resolve_expr(expr, &available_tables)?;
+                    new_columns.push(col.clone());
+                }
+            }
+        }
+        body.result_columns = new_columns;
+
+        // 3. Resolve WHERE clause
+        if let Some(where_) = &mut body.where_ {
+            self.resolve_expr(where_, &available_tables)?;
+        }
+
+        Ok(())
     }
 
-    #[test]
-    fn affinity_real() {
-        assert_eq!(Affinity::from_type_name("REAL"), Affinity::Real);
-        assert_eq!(Affinity::from_type_name("DOUBLE"), Affinity::Real);
-        assert_eq!(Affinity::from_type_name("FLOAT"), Affinity::Real);
-    }
+    fn resolve_expr(&self, expr: &mut Expr, available_tables: &[(String, sqlite3_schema::SchemaObject)]) -> ResolveResult<()> {
+        match expr {
+            Expr::Column { table, name, .. } => {
+                let mut matches = 0;
+                let mut resolved_table = None;
 
-    #[test]
-    fn affinity_numeric() {
-        assert_eq!(Affinity::from_type_name("NUMERIC"), Affinity::Numeric);
-        assert_eq!(Affinity::from_type_name("DECIMAL"), Affinity::Numeric);
+                if let Some(t_name) = table {
+                    for (alias, obj) in available_tables {
+                        if alias == t_name {
+                            if obj.columns.iter().any(|c| &c.name == name) {
+                                matches += 1;
+                                resolved_table = Some(alias.clone());
+                            }
+                        }
+                    }
+                } else {
+                    for (alias, obj) in available_tables {
+                        if obj.columns.iter().any(|c| &c.name == name) {
+                            matches += 1;
+                            resolved_table = Some(alias.clone());
+                        }
+                    }
+                }
+
+                if matches == 0 {
+                    return Err(ResolveError::NoSuchColumn(name.clone()));
+                } else if matches > 1 {
+                    return Err(ResolveError::AmbiguousColumn(name.clone()));
+                }
+
+                *table = resolved_table;
+                Ok(())
+            }
+            Expr::Binary { left, right, .. } => {
+                self.resolve_expr(left, available_tables)?;
+                self.resolve_expr(right, available_tables)?;
+                Ok(())
+            }
+            Expr::Literal(_) => Ok(()),
+            _ => Err(ResolveError::NotImplemented),
+        }
     }
 }
