@@ -207,9 +207,146 @@ impl Vdbe {
         addr
     }
 
-    /// Execute one step. Returns `Row` when a result row is ready, or `Done`.
     pub fn step(&mut self) -> VdbeResult<StepResult> {
-        Err(VdbeError::NotImplemented)
+        if self.halted {
+            return Ok(StepResult::Done);
+        }
+
+        while self.pc < self.ops.len() {
+            let op = &self.ops[self.pc];
+            self.pc += 1;
+
+            match op.opcode {
+                Opcode::Init => {
+                    self.pc = op.p2 as usize;
+                }
+                Opcode::Halt => {
+                    self.halted = true;
+                    return Ok(StepResult::Done);
+                }
+                Opcode::Goto => {
+                    self.pc = op.p2 as usize;
+                }
+                Opcode::Gosub => {
+                    self.call_stack.push(self.pc);
+                    self.pc = op.p2 as usize;
+                }
+                Opcode::Return => {
+                    if let Some(ret) = self.call_stack.pop() {
+                        self.pc = ret;
+                    } else {
+                        return Err(VdbeError::Exec("Return without Gosub".to_string()));
+                    }
+                }
+                Opcode::Integer => {
+                    self.regs[op.p2 as usize] = Mem::Int(op.p1 as i64);
+                }
+                Opcode::Real => {
+                    if let P4::Real(f) = op.p4 {
+                        self.regs[op.p2 as usize] = Mem::Real(f);
+                    } else {
+                        return Err(VdbeError::Exec("Invalid P4 for Real opcode".to_string()));
+                    }
+                }
+                Opcode::String8 => {
+                    if let P4::Text(ref t) = op.p4 {
+                        self.regs[op.p2 as usize] = Mem::Text(t.clone());
+                    } else {
+                        return Err(VdbeError::Exec("Invalid P4 for String8 opcode".to_string()));
+                    }
+                }
+                Opcode::Null => {
+                    self.regs[op.p2 as usize] = Mem::Null;
+                }
+                Opcode::Move => {
+                    let mut val = Mem::Null;
+                    std::mem::swap(&mut val, &mut self.regs[op.p1 as usize]);
+                    self.regs[op.p2 as usize] = val;
+                }
+                Opcode::Copy => {
+                    self.regs[op.p2 as usize] = self.regs[op.p1 as usize].clone();
+                }
+                Opcode::AddInt => {
+                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                        self.regs[op.p3 as usize] = Mem::Int(b + a);
+                    } else {
+                        return Err(VdbeError::Exec("Type mismatch in AddInt".to_string()));
+                    }
+                }
+                Opcode::SubtractInt => {
+                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                        self.regs[op.p3 as usize] = Mem::Int(b - a);
+                    } else {
+                        return Err(VdbeError::Exec("Type mismatch in SubtractInt".to_string()));
+                    }
+                }
+                Opcode::MultiplyInt => {
+                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                        self.regs[op.p3 as usize] = Mem::Int(b * a);
+                    } else {
+                        return Err(VdbeError::Exec("Type mismatch in MultiplyInt".to_string()));
+                    }
+                }
+                Opcode::DivideInt => {
+                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                        if a == 0 {
+                            return Err(VdbeError::Exec("Division by zero".to_string()));
+                        }
+                        self.regs[op.p3 as usize] = Mem::Int(b / a);
+                    } else {
+                        return Err(VdbeError::Exec("Type mismatch in DivideInt".to_string()));
+                    }
+                }
+                Opcode::RemainderInt => {
+                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                        if a == 0 {
+                            return Err(VdbeError::Exec("Division by zero".to_string()));
+                        }
+                        self.regs[op.p3 as usize] = Mem::Int(b % a);
+                    } else {
+                        return Err(VdbeError::Exec("Type mismatch in RemainderInt".to_string()));
+                    }
+                }
+                Opcode::Eq => {
+                    if self.regs[op.p1 as usize] == self.regs[op.p3 as usize] {
+                        self.pc = op.p2 as usize;
+                    }
+                }
+                Opcode::Ne => {
+                    if self.regs[op.p1 as usize] != self.regs[op.p3 as usize] {
+                        self.pc = op.p2 as usize;
+                    }
+                }
+                Opcode::Lt => {
+                    if let (Some(a), Some(b)) = (self.regs[op.p3 as usize].to_real(), self.regs[op.p1 as usize].to_real()) {
+                        if a < b { self.pc = op.p2 as usize; }
+                    }
+                }
+                Opcode::Le => {
+                    if let (Some(a), Some(b)) = (self.regs[op.p3 as usize].to_real(), self.regs[op.p1 as usize].to_real()) {
+                        if a <= b { self.pc = op.p2 as usize; }
+                    }
+                }
+                Opcode::Gt => {
+                    if let (Some(a), Some(b)) = (self.regs[op.p3 as usize].to_real(), self.regs[op.p1 as usize].to_real()) {
+                        if a > b { self.pc = op.p2 as usize; }
+                    }
+                }
+                Opcode::Ge => {
+                    if let (Some(a), Some(b)) = (self.regs[op.p3 as usize].to_real(), self.regs[op.p1 as usize].to_real()) {
+                        if a >= b { self.pc = op.p2 as usize; }
+                    }
+                }
+                Opcode::ResultRow => {
+                    return Ok(StepResult::Row);
+                }
+                Opcode::Noop => {}
+                _ => return Err(VdbeError::NotImplemented),
+            }
+        }
+        
+        self.halted = true;
+        Ok(StepResult::Done)
     }
 
     /// Reset the VM for re-execution (bindings remain).
