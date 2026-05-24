@@ -9,3 +9,7 @@ license.workspace = true
 sqlite3-ast = { path = "../sqlite3-ast" }
 sqlite3-schema = { path = "../sqlite3-schema" }
 thiserror.workspace = true
+
+[dev-dependencies]
+sqlite3-parser = { path = "../sqlite3-parser" }
+sqlite3-resolve = { path = "../sqlite3-resolve" }
