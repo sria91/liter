@@ -375,6 +375,10 @@ impl<'a> Parser<'a> {
                 self.consume()?;
                 Ok(Expr::Literal(LiteralValue::Integer(s.parse().unwrap_or(0))))
             }
+            Some(Token::Float(s)) => {
+                self.consume()?;
+                Ok(Expr::Literal(LiteralValue::Float(s.parse().unwrap_or(0.0))))
+            }
             Some(Token::StringLit(s)) => {
                 self.consume()?;
                 let val = &s[1..s.len() - 1];

@@ -22,20 +22,24 @@ fn test_open_and_close() {
 
 #[test]
 fn test_exec_stub() {
-    unsafe {
-        let mut db: *mut sqlite3 = ptr::null_mut();
-        let path = CString::new(":memory:").unwrap();
-        sqlite3_open(path.as_ptr(), &mut db);
-        
-        let sql = CString::new("SELECT 1;").unwrap();
-        let mut errmsg: *mut c_char = ptr::null_mut();
-        
-        // sqlite3_crate currently returns NotImplemented for execute, which maps to SQLITE_ERROR
-        let rc = sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), &mut errmsg);
-        assert_eq!(rc, SQLITE_ERROR);
-        
-        sqlite3_close(db);
-    }
+    let mut db: *mut sqlite3 = ptr::null_mut();
+    let rc = unsafe { sqlite3_open(b":memory:\0".as_ptr() as *const c_char, &mut db) };
+    assert_eq!(rc, 0);
+
+    let err_msg: *mut *mut c_char = ptr::null_mut();
+    // Since sqlite3 execute() is now wired, SELECT 1 should succeed and return SQLITE_OK (0).
+    let rc = unsafe {
+        sqlite3_exec(
+            db,
+            b"SELECT 1;\0".as_ptr() as *const c_char,
+            None,
+            ptr::null_mut(),
+            err_msg,
+        )
+    };
+    assert_eq!(rc, 0);
+
+    unsafe { sqlite3_close(db) };
 }
 
 #[test]

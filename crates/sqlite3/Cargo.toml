@@ -17,6 +17,7 @@ sqlite3-record = { path = "../sqlite3-record" }
 sqlite3-schema = { path = "../sqlite3-schema" }
 sqlite3-tokenizer = { path = "../sqlite3-tokenizer" }
 sqlite3-parser = { path = "../sqlite3-parser" }
+sqlite3-codegen = { path = "../sqlite3-codegen" }
 sqlite3-vdbe = { path = "../sqlite3-vdbe" }
 sqlite3-functions = { path = "../sqlite3-functions" }
 thiserror.workspace = true

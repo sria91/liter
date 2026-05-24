@@ -77,6 +77,18 @@ impl From<sqlite3_parser::ParseError> for SqliteError {
     }
 }
 
+impl From<sqlite3_codegen::CodegenError> for SqliteError {
+    fn from(e: sqlite3_codegen::CodegenError) -> Self {
+        SqliteError::Sql(format!("codegen error: {}", e))
+    }
+}
+
+impl From<sqlite3_vdbe::VdbeError> for SqliteError {
+    fn from(e: sqlite3_vdbe::VdbeError) -> Self {
+        SqliteError::Sql(format!("execution error: {}", e))
+    }
+}
+
 pub type SqliteResult<T> = Result<T, SqliteError>;
 
 /// An open database connection.
@@ -100,15 +112,38 @@ impl Connection {
     }
 
     /// Execute a SQL statement, discarding any result rows.
-    pub fn execute(&self, sql: &str, _params: impl IntoParams) -> SqliteResult<u64> {
-        let _ = sql;
-        Err(SqliteError::NotImplemented)
+    pub fn execute(&self, sql: &str, params: impl IntoParams) -> SqliteResult<u64> {
+        // Run query and just discard the rows, returning 0 for now.
+        // In a full implementation, this would return the number of rows modified.
+        let _ = self.query(sql, params)?;
+        Ok(0)
     }
 
     /// Execute a SQL query and return all result rows.
     pub fn query(&self, sql: &str, _params: impl IntoParams) -> SqliteResult<Vec<Vec<Value>>> {
-        let _ = sql;
-        Err(SqliteError::NotImplemented)
+        let ast = sqlite3_parser::parse_stmt(sql)?;
+        
+        let mut results = Vec::new();
+
+        // Right now our AST root is a single Stmt. In the future it will be a list.
+        let mut vm = sqlite3_codegen::compile(&ast)?;
+
+        loop {
+            match vm.step()? {
+                sqlite3_vdbe::StepResult::Row => {
+                    if let Some(row) = vm.current_result_row() {
+                        let mut out_row = Vec::with_capacity(row.len());
+                        for mem in row {
+                            out_row.push(mem_to_value(mem));
+                        }
+                        results.push(out_row);
+                    }
+                }
+                sqlite3_vdbe::StepResult::Done => break,
+            }
+        }
+
+        Ok(results)
     }
 
     /// Execute a SQL query expected to return a single value.
@@ -117,6 +152,15 @@ impl Connection {
         let row = rows.into_iter().next().ok_or_else(|| SqliteError::Sql("no rows returned".into()))?;
         let val = row.into_iter().next().ok_or_else(|| SqliteError::Sql("no columns returned".into()))?;
         T::from_value(val)
+    }
+
+    pub fn query_row(&self, sql: &str, _params: impl IntoParams) -> SqliteResult<Vec<Value>> {
+        let mut rows = self.query(sql, _params)?;
+        if rows.is_empty() {
+            Err(SqliteError::Sql("Query returned no rows".into()))
+        } else {
+            Ok(rows.remove(0))
+        }
     }
 
     /// Prepare a SQL statement for repeated execution.
@@ -128,6 +172,17 @@ impl Connection {
     /// Path this connection was opened with.
     pub fn path(&self) -> &str {
         &self.path
+    }
+}
+
+fn mem_to_value(mem: &sqlite3_vdbe::Mem) -> Value {
+    match mem {
+        sqlite3_vdbe::Mem::Null => Value::Null,
+        sqlite3_vdbe::Mem::Int(i) => Value::Int(*i),
+        sqlite3_vdbe::Mem::Real(f) => Value::Real(*f),
+        sqlite3_vdbe::Mem::Text(t) => Value::Text(t.as_bytes().to_vec()),
+        sqlite3_vdbe::Mem::Blob(b) => Value::Blob(b.to_vec()),
+        sqlite3_vdbe::Mem::ZeroBlob(n) => Value::Blob(vec![0; *n as usize]),
     }
 }
 
@@ -210,17 +265,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn open_in_memory() {
+    fn test_execute_simple_select() {
         let conn = Connection::open_in_memory().unwrap();
-        assert_eq!(conn.path(), ":memory:");
+        let rows = conn.query("SELECT 1 + 1;", [] as [(); 0]).unwrap();
+        
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 1);
+        assert_eq!(rows[0][0], Value::Int(2));
     }
 
     #[test]
-    fn execute_not_yet_implemented() {
+    fn test_execute_multiple_columns() {
         let conn = Connection::open_in_memory().unwrap();
-        assert!(matches!(
-            conn.execute("SELECT 1", [] as [(); 0]),
-            Err(SqliteError::NotImplemented)
-        ));
+        let rows = conn.query("SELECT 42, 'hello', 3.14;", [] as [(); 0]).unwrap();
+        
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 3);
+        assert_eq!(rows[0][0], Value::Int(42));
+        assert_eq!(rows[0][1], Value::Text(b"hello".to_vec()));
+        assert_eq!(rows[0][2], Value::Real(3.14));
+    }
+
+    #[test]
+    fn open_in_memory() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.path(), ":memory:");
     }
 }

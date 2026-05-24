@@ -169,6 +169,8 @@ pub struct Vdbe {
     call_stack: Vec<usize>,
     /// Whether the VM has halted.
     halted: bool,
+    /// Holds the range of registers returned by the last ResultRow.
+    last_result_row: Option<(usize, usize)>,
 }
 
 impl Vdbe {
@@ -180,6 +182,7 @@ impl Vdbe {
             regs: Vec::new(),
             call_stack: Vec::new(),
             halted: false,
+            last_result_row: None,
         }
     }
 
@@ -190,6 +193,16 @@ impl Vdbe {
             regs: vec![Mem::Null; n_regs],
             call_stack: Vec::new(),
             halted: false,
+            last_result_row: None,
+        }
+    }
+
+    /// Extract the slice of registers from the last `ResultRow` emission.
+    pub fn current_result_row(&self) -> Option<&[Mem]> {
+        if let Some((start, count)) = self.last_result_row {
+            Some(&self.regs[start..start + count])
+        } else {
+            None
         }
     }
 
@@ -338,6 +351,7 @@ impl Vdbe {
                     }
                 }
                 Opcode::ResultRow => {
+                    self.last_result_row = Some((op.p1 as usize, op.p2 as usize));
                     return Ok(StepResult::Row);
                 }
                 Opcode::Noop => {}
@@ -346,6 +360,7 @@ impl Vdbe {
         }
         
         self.halted = true;
+        self.last_result_row = None;
         Ok(StepResult::Done)
     }
 
@@ -353,6 +368,7 @@ impl Vdbe {
     pub fn reset(&mut self) -> VdbeResult<()> {
         self.pc = 0;
         self.halted = false;
+        self.last_result_row = None;
         for r in &mut self.regs { *r = Mem::Null; }
         Ok(())
     }
