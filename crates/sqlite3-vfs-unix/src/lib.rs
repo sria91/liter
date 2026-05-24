@@ -254,3 +254,88 @@ impl Vfs for UnixVfs {
         "unix"
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use sqlite3_vfs::{LockLevel, OpenFlags, VfsFile};
+    use tempfile::NamedTempFile;
+
+    fn open_file() -> (NamedTempFile, UnixFile) {
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"\x00").unwrap();
+        let vfs = UnixVfs;
+        let f = vfs.open(tmp.path(), OpenFlags::READ_WRITE).unwrap();
+        (tmp, f)
+    }
+
+    #[test]
+    fn lock_upgrade_downgrade() {
+        let (_tmp, mut f) = open_file();
+        assert_eq!(f.lock, LockLevel::None);
+
+        f.lock(LockLevel::Shared).unwrap();
+        assert_eq!(f.lock, LockLevel::Shared);
+
+        f.lock(LockLevel::Reserved).unwrap();
+        assert_eq!(f.lock, LockLevel::Reserved);
+
+        f.lock(LockLevel::Exclusive).unwrap();
+        assert_eq!(f.lock, LockLevel::Exclusive);
+
+        f.unlock(LockLevel::Shared).unwrap();
+        assert_eq!(f.lock, LockLevel::Shared);
+
+        f.unlock(LockLevel::None).unwrap();
+        assert_eq!(f.lock, LockLevel::None);
+    }
+
+    #[test]
+    fn lock_idempotent() {
+        let (_tmp, mut f) = open_file();
+        f.lock(LockLevel::Shared).unwrap();
+        f.lock(LockLevel::Shared).unwrap(); // no-op
+        assert_eq!(f.lock, LockLevel::Shared);
+    }
+
+    #[test]
+    fn check_reserved_lock_false_when_no_locker() {
+        let (_tmp, f) = open_file();
+        assert!(!f.check_reserved_lock().unwrap());
+    }
+
+    #[test]
+    fn check_reserved_lock_own_lock_posix_semantics() {
+        // POSIX F_GETLK: our own locks are never reported as conflicting.
+        let (_tmp, mut f) = open_file();
+        f.lock(LockLevel::Shared).unwrap();
+        f.lock(LockLevel::Reserved).unwrap();
+        assert!(!f.check_reserved_lock().unwrap());
+    }
+
+    #[test]
+    fn unlock_same_level_no_op() {
+        let (_tmp, mut f) = open_file();
+        f.lock(LockLevel::Shared).unwrap();
+        f.unlock(LockLevel::Shared).unwrap(); // already at Shared → no-op
+        assert_eq!(f.lock, LockLevel::Shared);
+    }
+
+    #[test]
+    fn basic_rw_via_vfs_file() {
+        let (_tmp, mut f) = open_file();
+        f.write(b"hello", 0).unwrap();
+        let mut buf = [0u8; 5];
+        f.read(&mut buf, 0).unwrap();
+        assert_eq!(&buf, b"hello");
+    }
+
+    #[test]
+    fn sector_size_and_characteristics() {
+        let (_tmp, f) = open_file();
+        assert_eq!(f.sector_size(), 4096);
+        assert!(f.device_characteristics().contains(DeviceCharacteristics::SAFE_APPEND));
+    }
+}
