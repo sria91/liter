@@ -83,12 +83,88 @@ pub fn func_ifnull(args: &[Mem]) -> FuncResult<Mem> {
     func_coalesce(args)
 }
 
+fn compare_mem(a: &Mem, b: &Mem) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Mem::Null, Mem::Null) => Ordering::Equal,
+        (Mem::Null, _) => Ordering::Less,
+        (_, Mem::Null) => Ordering::Greater,
+        (Mem::Int(i1), Mem::Int(i2)) => i1.cmp(i2),
+        (Mem::Real(f1), Mem::Real(f2)) => f1.partial_cmp(f2).unwrap_or(Ordering::Equal),
+        (Mem::Int(i), Mem::Real(f)) => (*i as f64).partial_cmp(f).unwrap_or(Ordering::Equal),
+        (Mem::Real(f), Mem::Int(i)) => f.partial_cmp(&(*i as f64)).unwrap_or(Ordering::Equal),
+        (Mem::Text(s1), Mem::Text(s2)) => s1.cmp(s2),
+        (Mem::Int(_) | Mem::Real(_), Mem::Text(_)) => Ordering::Less,
+        (Mem::Text(_), Mem::Int(_) | Mem::Real(_)) => Ordering::Greater,
+        _ => Ordering::Equal, // simplified fallback
+    }
+}
+
 pub fn func_max_scalar(args: &[Mem]) -> FuncResult<Mem> {
-    Err(FuncError::NotImplemented("max".into()))
+    if args.is_empty() {
+        return Ok(Mem::Null);
+    }
+    let mut max_val = &args[0];
+    for val in args.iter().skip(1) {
+        if compare_mem(val, max_val) == std::cmp::Ordering::Greater {
+            max_val = val;
+        }
+    }
+    Ok(max_val.clone())
 }
 
 pub fn func_min_scalar(args: &[Mem]) -> FuncResult<Mem> {
-    Err(FuncError::NotImplemented("min".into()))
+    if args.is_empty() {
+        return Ok(Mem::Null);
+    }
+    let mut min_val = &args[0];
+    for val in args.iter().skip(1) {
+        // In min(), NULL is less than everything, but typical SQL min ignores nulls?
+        // Actually SQLite scalar min() treats NULL as smaller than everything else.
+        if compare_mem(val, min_val) == std::cmp::Ordering::Less {
+            min_val = val;
+        }
+    }
+    Ok(min_val.clone())
+}
+
+pub fn func_round(args: &[Mem]) -> FuncResult<Mem> {
+    if args.is_empty() {
+        return Ok(Mem::Null);
+    }
+    let val = match &args[0] {
+        Mem::Null => return Ok(Mem::Null),
+        Mem::Int(i) => *i as f64,
+        Mem::Real(f) => *f,
+        Mem::Text(s) => s.parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    };
+    
+    let digits = if args.len() > 1 {
+        match &args[1] {
+            Mem::Int(i) => *i,
+            Mem::Real(f) => *f as i64,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    
+    if digits == 0 {
+        Ok(Mem::Real(val.round()))
+    } else {
+        let multiplier = 10.0_f64.powi(digits as i32);
+        Ok(Mem::Real((val * multiplier).round() / multiplier))
+    }
+}
+
+pub fn func_sign(args: &[Mem]) -> FuncResult<Mem> {
+    match args.first() {
+        Some(Mem::Int(i)) => Ok(Mem::Int(i.signum())),
+        Some(Mem::Real(f)) => Ok(Mem::Int(if *f > 0.0 { 1 } else if *f < 0.0 { -1 } else { 0 })),
+        Some(Mem::Null) | None => Ok(Mem::Null),
+        _ => Ok(Mem::Int(0)),
+    }
 }
 
 #[cfg(test)]
@@ -121,5 +197,36 @@ mod tests {
     fn coalesce_first_non_null() {
         let v = func_coalesce(&[Mem::Null, Mem::Int(42), Mem::Int(99)]).unwrap();
         assert_eq!(v, Mem::Int(42));
+    }
+
+    #[test]
+    fn test_max_scalar() {
+        let args = [Mem::Int(10), Mem::Int(42), Mem::Int(-5)];
+        assert_eq!(func_max_scalar(&args).unwrap(), Mem::Int(42));
+        
+        let mixed = [Mem::Int(10), Mem::Real(15.5)];
+        assert_eq!(func_max_scalar(&mixed).unwrap(), Mem::Real(15.5));
+    }
+
+    #[test]
+    fn test_min_scalar() {
+        let args = [Mem::Int(10), Mem::Int(42), Mem::Int(-5)];
+        assert_eq!(func_min_scalar(&args).unwrap(), Mem::Int(-5));
+        
+        let with_null = [Mem::Int(10), Mem::Null, Mem::Int(-5)];
+        assert_eq!(func_min_scalar(&with_null).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn test_round() {
+        assert_eq!(func_round(&[Mem::Real(3.14159), Mem::Int(2)]).unwrap(), Mem::Real(3.14));
+        assert_eq!(func_round(&[Mem::Real(3.14159)]).unwrap(), Mem::Real(3.0));
+    }
+
+    #[test]
+    fn test_sign() {
+        assert_eq!(func_sign(&[Mem::Int(-42)]).unwrap(), Mem::Int(-1));
+        assert_eq!(func_sign(&[Mem::Real(3.14)]).unwrap(), Mem::Int(1));
+        assert_eq!(func_sign(&[Mem::Int(0)]).unwrap(), Mem::Int(0));
     }
 }

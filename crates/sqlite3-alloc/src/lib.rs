@@ -72,6 +72,7 @@ unsafe impl SqliteAlloc for SystemAlloc {
         }
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn free(&self, ptr: *mut u8) {
         if ptr.is_null() {
             return;
@@ -86,6 +87,7 @@ unsafe impl SqliteAlloc for SystemAlloc {
         }
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn realloc(&self, ptr: *mut u8, n: usize) -> *mut u8 {
         if ptr.is_null() {
             return self.malloc(n);
@@ -109,6 +111,7 @@ unsafe impl SqliteAlloc for SystemAlloc {
         }
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn size(&self, ptr: *mut u8) -> usize {
         if ptr.is_null() {
             return 0;
