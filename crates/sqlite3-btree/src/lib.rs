@@ -410,32 +410,55 @@ impl BTreeCursor<'_> {
         };
         self.stack.push(CursorFrame { pgno, cell_idx: lo });
         self.find_leaf_for_insert(child, rowid)
-
     }
 
     /// Delete the entry at the current cursor position.
+    ///
+    /// After deletion the cursor is repositioned to the next row (if any),
+    /// with `current_key`/`current_data` refreshed so that subsequent
+    /// `Column` reads see the correct data.
     pub fn delete(&mut self) -> BTreeResult<()> {
         if self.state != CursorState::Valid { return Err(BTreeError::InvalidCursor); }
-        let frame = self.stack.last().cloned().ok_or(BTreeError::InvalidCursor)?;
+        let frame = self.stack.last_mut().ok_or(BTreeError::InvalidCursor)?;
         let pgno = frame.pgno;
         let idx = frame.cell_idx;
 
-        let mut pg = self.btree.pager.lock().unwrap();
-        let data = pg.write_access(pgno)?;
-        let hdr = PageHeader::parse(data, pgno)?;
-        if idx >= hdr.cell_count { return Err(BTreeError::Corrupt); }
+        // Remove the cell pointer for `idx`, shift remaining pointers left.
+        let new_count = {
+            let mut pg = self.btree.pager.lock().unwrap();
+            let data = pg.write_access(pgno)?;
+            let hdr = PageHeader::parse(data, pgno)?;
+            if idx >= hdr.cell_count { return Err(BTreeError::Corrupt); }
 
-        let ho = hdr.header_offset;
-        let hs = hdr.kind.header_size();
-        let ptr_off = ho + hs + idx as usize * 2;
-        let shift = (hdr.cell_count - idx - 1) as usize * 2;
-        data.copy_within(ptr_off + 2..ptr_off + 2 + shift, ptr_off);
+            let ho = hdr.header_offset;
+            let hs = hdr.kind.header_size();
+            let ptr_off = ho + hs + idx as usize * 2;
+            let shift = (hdr.cell_count - idx - 1) as usize * 2;
+            data.copy_within(ptr_off + 2..ptr_off + 2 + shift, ptr_off);
 
-        let ncc = (hdr.cell_count - 1).to_be_bytes();
-        data[ho + 3] = ncc[0]; data[ho + 4] = ncc[1];
-        self.state = CursorState::Invalid;
+            let new_count = hdr.cell_count - 1;
+            let ncc = new_count.to_be_bytes();
+            data[ho + 3] = ncc[0]; data[ho + 4] = ncc[1];
+            new_count
+        };
+
+        // Reposition: after deletion, `idx` still points to the next row
+        // (which slid into position idx), or the cursor is exhausted.
+        if idx < new_count {
+            // Reload key/data so Column reads the new row, not the deleted one.
+            self.state = CursorState::Valid;
+            let page_data = self.page(pgno)?;
+            let hdr = PageHeader::parse(&page_data, pgno)?;
+            self.load_cell(&page_data, &hdr, idx)?;
+        } else {
+            // Deleted the last row on this page.
+            self.state = CursorState::Invalid;
+            self.current_key.clear();
+            self.current_data.clear();
+        }
         Ok(())
     }
+
 
     // ── Cell building ─────────────────────────────────────────────────────────
 

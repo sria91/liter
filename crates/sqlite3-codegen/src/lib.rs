@@ -40,6 +40,11 @@ impl<'a> Compiler<'a> {
             Stmt::Select(select) => self.compile_select(select)?,
             Stmt::Create(create) => self.compile_create(create)?,
             Stmt::Insert(insert) => self.compile_insert(insert)?,
+            Stmt::Delete(delete) => self.compile_delete(delete)?,
+            Stmt::Update(update) => self.compile_update(update)?,
+            // Transaction stmts produce no bytecode — handled by Connection.
+            Stmt::Begin(_) | Stmt::Commit | Stmt::Rollback { .. }
+            | Stmt::Savepoint(_) | Stmt::Release(_) => {}
             _ => return Err(CodegenError::NotImplemented),
         }
         
@@ -582,6 +587,169 @@ impl Compiler<'_> {
             p4: P4::None,
             p5: 0,
         });
+
+        Ok(())
+    }
+
+    /// Compile `DELETE FROM table [WHERE expr]`.
+    ///
+    /// Bytecode layout:
+    /// ```text
+    /// OpenWrite(cursor, root_page)
+    /// Rewind(cursor, end_label)
+    /// loop_top:
+    ///   [WHERE: IfNot(pred, skip_label)]
+    ///   Delete(cursor)
+    ///   Next(cursor, loop_top, p5=1)   ← post-delete: cursor already repositioned
+    ///   Goto(end_label)                ← Next fell through → done
+    /// skip_label:
+    ///   Next(cursor, loop_top, p5=0)   ← normal advance for non-deleted rows
+    /// end_label:
+    ///   Close(cursor)
+    /// ```
+    fn compile_delete(&mut self, delete: &DeleteStmt) -> CodegenResult<()> {
+        let schema = self.schema
+            .ok_or_else(|| CodegenError::Schema("no schema context".to_string()))?;
+        let table_name = &delete.table.name;
+        let schema_obj = schema.get(table_name)
+            .ok_or_else(|| CodegenError::Schema(format!("table '{}' not found", table_name)))?;
+        let root_page = schema_obj.root_page;
+        let schema_cols = schema_obj.columns.clone();
+
+        let cursor_id = self.vm.n_cursors;
+        self.vm.n_cursors += 1;
+
+        self.vm.emit(VdbeOp { opcode: Opcode::OpenWrite, p1: cursor_id as i32, p2: root_page as i32, p3: 0, p4: P4::None, p5: 0 });
+
+        let rewind_addr = self.vm.emit(VdbeOp { opcode: Opcode::Rewind, p1: cursor_id as i32, p2: 0, p3: 0, p4: P4::None, p5: 0 });
+        let loop_top = self.vm.ops.len();
+
+        // WHERE predicate: on mismatch jump to skip_label (patched below)
+        let where_patches = if let Some(where_expr) = &delete.where_ {
+            self.compile_where_expr(where_expr, cursor_id, &schema_cols)?
+        } else {
+            vec![]
+        };
+
+        // Delete current row (cursor repositions to next row or becomes Invalid)
+        self.vm.emit(VdbeOp { opcode: Opcode::Delete, p1: cursor_id as i32, p2: 0, p3: 0, p4: P4::None, p5: 0 });
+
+        // Post-delete Next: p5=1 means "cursor may already be valid at next row"
+        self.vm.emit(VdbeOp { opcode: Opcode::Next, p1: cursor_id as i32, p2: loop_top as i32, p3: 0, p4: P4::None, p5: 1 });
+        // If Next fell through here, the table is exhausted — jump to end
+        let goto_end_addr = self.vm.emit(VdbeOp { opcode: Opcode::Goto, p1: 0, p2: 0, p3: 0, p4: P4::None, p5: 0 });
+
+        // skip_label: WHERE-skipped rows land here and use a normal Next
+        let skip_label = self.vm.ops.len();
+        for addr in where_patches {
+            self.vm.ops[addr].p2 = skip_label as i32;
+        }
+        self.vm.emit(VdbeOp { opcode: Opcode::Next, p1: cursor_id as i32, p2: loop_top as i32, p3: 0, p4: P4::None, p5: 0 });
+
+        let end_label = self.vm.ops.len();
+        self.vm.ops[rewind_addr].p2 = end_label as i32;
+        self.vm.ops[goto_end_addr].p2 = end_label as i32;
+
+        self.vm.emit(VdbeOp { opcode: Opcode::Close, p1: cursor_id as i32, p2: 0, p3: 0, p4: P4::None, p5: 0 });
+
+        Ok(())
+    }
+
+    /// Compile `UPDATE table SET col = expr [, ...] [WHERE expr]`.
+    ///
+    /// Strategy: full-table scan; for each matching row, read all columns,
+    /// apply the assignment expressions, re-encode the record, delete the old
+    /// row, and insert the new record at the same rowid.
+    fn compile_update(&mut self, update: &UpdateStmt) -> CodegenResult<()> {
+        let schema = self.schema
+            .ok_or_else(|| CodegenError::Schema("no schema context".to_string()))?;
+        let table_name = &update.table.name;
+        let schema_obj = schema.get(table_name)
+            .ok_or_else(|| CodegenError::Schema(format!("table '{}' not found", table_name)))?;
+        let root_page = schema_obj.root_page;
+        let schema_cols = schema_obj.columns.clone();
+        let n_cols = schema_cols.len();
+
+        let cursor_id = self.vm.n_cursors;
+        self.vm.n_cursors += 1;
+
+        self.vm.emit(VdbeOp { opcode: Opcode::OpenWrite, p1: cursor_id as i32, p2: root_page as i32, p3: 0, p4: P4::None, p5: 0 });
+
+        let rewind_addr = self.vm.emit(VdbeOp { opcode: Opcode::Rewind, p1: cursor_id as i32, p2: 0, p3: 0, p4: P4::None, p5: 0 });
+        let loop_top = self.vm.ops.len();
+
+        // WHERE predicate
+        let next_label_patches = if let Some(where_expr) = &update.where_ {
+            self.compile_where_expr(where_expr, cursor_id, &schema_cols)?
+        } else {
+            vec![]
+        };
+
+        // Read all columns into contiguous registers, then overwrite with SET values.
+        let base_reg = self.vm.alloc_reg();
+        for _ in 1..n_cols { self.vm.alloc_reg(); }
+
+        for col_idx in 0..n_cols {
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::Column,
+                p1: cursor_id as i32,
+                p2: col_idx as i32,
+                p3: (base_reg + col_idx) as i32,
+                p4: P4::None, p5: 0,
+            });
+        }
+
+        // Apply SET assignments: overwrite the target column register.
+        for assignment in &update.assignments {
+            let col_name = assignment.columns.first()
+                .ok_or_else(|| CodegenError::Internal("empty assignment".to_string()))?;
+            let col_idx = schema_cols.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))
+                .ok_or_else(|| CodegenError::Schema(format!("column '{}' not found", col_name)))?;
+            // Compile new value expression; write into target register directly.
+            let r_val = self.compile_expr(&assignment.value, Some((cursor_id, &schema_cols)))?;
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::Copy,
+                p1: r_val as i32,
+                p2: (base_reg + col_idx) as i32,
+                p3: 0, p4: P4::None, p5: 0,
+            });
+        }
+
+        // Capture the current rowid before deleting.
+        let rowid_reg = self.vm.alloc_reg();
+        self.vm.emit(VdbeOp { opcode: Opcode::RowId, p1: cursor_id as i32, p2: rowid_reg as i32, p3: 0, p4: P4::None, p5: 0 });
+
+        // Re-encode the updated row.
+        let record_reg = self.vm.alloc_reg();
+        self.vm.emit(VdbeOp { opcode: Opcode::MakeRecord, p1: base_reg as i32, p2: n_cols as i32, p3: record_reg as i32, p4: P4::None, p5: 0 });
+
+        // Delete old row, then insert updated row at the same rowid.
+        self.vm.emit(VdbeOp { opcode: Opcode::Delete, p1: cursor_id as i32, p2: 0, p3: 0, p4: P4::None, p5: 0 });
+        self.vm.emit(VdbeOp { opcode: Opcode::Insert, p1: cursor_id as i32, p2: record_reg as i32, p3: rowid_reg as i32, p4: P4::None, p5: 0 });
+
+        // After Delete+Insert the cursor is invalidated by Insert.
+        // Use SeekGt(rowid_reg) to find the next row after the updated one.
+        // If not found, SeekGt jumps to end_label (patched below).
+        let seekgt_addr = self.vm.emit(VdbeOp { opcode: Opcode::SeekGt, p1: cursor_id as i32, p2: 0, p3: rowid_reg as i32, p4: P4::None, p5: 0 });
+
+        // Found a row after the updated one — jump back to loop body.
+        self.vm.emit(VdbeOp { opcode: Opcode::Goto, p1: 0, p2: loop_top as i32, p3: 0, p4: P4::None, p5: 0 });
+
+        // Patch next_label: WHERE-skipped rows jump here (to the normal Next opcode).
+        let next_label = self.vm.ops.len();
+        for addr in next_label_patches {
+            self.vm.ops[addr].p2 = next_label as i32;
+        }
+
+        // For rows that did NOT match WHERE, use normal Next to advance.
+        let next_addr = self.vm.emit(VdbeOp { opcode: Opcode::Next, p1: cursor_id as i32, p2: loop_top as i32, p3: 0, p4: P4::None, p5: 0 });
+        let _ = next_addr;
+
+        let end_label = self.vm.ops.len();
+        self.vm.ops[rewind_addr].p2 = end_label as i32;
+        self.vm.ops[seekgt_addr].p2 = end_label as i32;
+
+        self.vm.emit(VdbeOp { opcode: Opcode::Close, p1: cursor_id as i32, p2: 0, p3: 0, p4: P4::None, p5: 0 });
 
         Ok(())
     }

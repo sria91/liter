@@ -49,13 +49,55 @@ impl<'a> Parser<'a> {
     pub fn parse_stmt(&mut self) -> ParseResult<Stmt> {
         let tok = self.peek()?.cloned();
         match tok {
-            Some(Token::Select) => Ok(Stmt::Select(Box::new(self.parse_select_stmt()?))),
-            Some(Token::Create) => self.parse_create_stmt(),
-            Some(Token::Insert) => self.parse_insert_stmt(),
-            Some(Token::Update) => self.parse_update_stmt(),
-            Some(Token::Delete) => self.parse_delete_stmt(),
+            Some(Token::Select)   => Ok(Stmt::Select(Box::new(self.parse_select_stmt()?))),
+            Some(Token::Create)   => self.parse_create_stmt(),
+            Some(Token::Insert)   => self.parse_insert_stmt(),
+            Some(Token::Update)   => self.parse_update_stmt(),
+            Some(Token::Delete)   => self.parse_delete_stmt(),
+            Some(Token::Begin)    => self.parse_transaction_stmt(),
+            Some(Token::Commit)   => { self.consume()?; self.consume_optional(Token::Transaction); Ok(Stmt::Commit) }
+            Some(Token::Rollback) => {
+                self.consume()?;
+                self.consume_optional(Token::Transaction);
+                let savepoint = if let Some(Token::To) = self.peek()? {
+                    self.consume()?;
+                    self.consume_optional(Token::Savepoint);
+                    Some(self.expect_ident()?)
+                } else { None };
+                Ok(Stmt::Rollback { savepoint })
+            }
+            Some(Token::Savepoint) => {
+                self.consume()?;
+                Ok(Stmt::Savepoint(self.expect_ident()?))
+            }
+            Some(Token::Release) => {
+                self.consume()?;
+                self.consume_optional(Token::Savepoint);
+                Ok(Stmt::Release(self.expect_ident()?))
+            }
             Some(tok) => Err(ParseError::SyntaxError(format!("Unexpected token starting statement: {:?}", tok))),
             None => Err(ParseError::UnexpectedEof),
+        }
+    }
+
+    fn parse_transaction_stmt(&mut self) -> ParseResult<Stmt> {
+        self.expect(Token::Begin)?;
+        let kind = match self.peek()? {
+            Some(Token::Deferred)  => { self.consume()?; TransactionKind::Deferred }
+            Some(Token::Immediate) => { self.consume()?; TransactionKind::Immediate }
+            Some(Token::Exclusive) => { self.consume()?; TransactionKind::Exclusive }
+            _ => TransactionKind::Deferred,
+        };
+        self.consume_optional(Token::Transaction);
+        Ok(Stmt::Begin(kind))
+    }
+
+    /// Consume the next token only if it matches `expected` (best-effort, no error).
+    fn consume_optional(&mut self, expected: Token<'a>) {
+        if let Ok(Some(t)) = self.peek() {
+            if *t == expected {
+                let _ = self.consume();
+            }
         }
     }
 
@@ -405,7 +447,10 @@ impl<'a> Parser<'a> {
 
     fn infix_binding_power(&self, tok: &Token) -> (u8, u8) {
         match tok {
-            Token::Eq | Token::EqEq | Token::Ne | Token::BangEq | Token::Lt | Token::Le | Token::Gt | Token::Ge => (5, 6),
+            Token::Or => (1, 2),
+            Token::And => (3, 4),
+            Token::Eq | Token::EqEq | Token::Ne | Token::BangEq
+            | Token::Lt | Token::Le | Token::Gt | Token::Ge => (5, 6),
             Token::Plus | Token::Minus => (9, 10),
             Token::Star | Token::Slash | Token::Percent => (11, 12),
             _ => (0, 0),
@@ -416,15 +461,17 @@ impl<'a> Parser<'a> {
         match tok {
             Token::Eq | Token::EqEq => Some(BinaryOp::Eq),
             Token::Ne | Token::BangEq => Some(BinaryOp::Ne),
-            Token::Lt => Some(BinaryOp::Lt),
-            Token::Le => Some(BinaryOp::Le),
-            Token::Gt => Some(BinaryOp::Gt),
-            Token::Ge => Some(BinaryOp::Ge),
-            Token::Plus => Some(BinaryOp::Add),
-            Token::Minus => Some(BinaryOp::Sub),
-            Token::Star => Some(BinaryOp::Mul),
-            Token::Slash => Some(BinaryOp::Div),
+            Token::Lt  => Some(BinaryOp::Lt),
+            Token::Le  => Some(BinaryOp::Le),
+            Token::Gt  => Some(BinaryOp::Gt),
+            Token::Ge  => Some(BinaryOp::Ge),
+            Token::Plus    => Some(BinaryOp::Add),
+            Token::Minus   => Some(BinaryOp::Sub),
+            Token::Star    => Some(BinaryOp::Mul),
+            Token::Slash   => Some(BinaryOp::Div),
             Token::Percent => Some(BinaryOp::Mod),
+            Token::And     => Some(BinaryOp::And),
+            Token::Or      => Some(BinaryOp::Or),
             _ => None,
         }
     }

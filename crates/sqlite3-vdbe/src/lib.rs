@@ -6,8 +6,9 @@
 //! ## Status
 //! Phase 3 — type definitions and VM skeleton only.
 
-use sqlite3_btree::{BTree, BTreeCursor, PageKind};
+use sqlite3_btree::{BTree, BTreeCursor, PageKind, SeekBias, SeekResult};
 use std::sync::Arc;
+
 
 /// A VDBE register value.
 #[derive(Debug, Clone, PartialEq)]
@@ -358,32 +359,41 @@ impl Vdbe {
                     }
                 }
                 Opcode::Eq => {
-                    if self.regs[op.p1 as usize] == self.regs[op.p3 as usize] {
-                        self.pc = op.p2 as usize;
-                    }
+                    let lhs = &self.regs[op.p1 as usize];
+                    let rhs = &self.regs[op.p3 as usize];
+                    let eq = match (lhs.to_real(), rhs.to_real()) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => lhs == rhs,
+                    };
+                    if eq { self.pc = op.p2 as usize; }
                 }
                 Opcode::Ne => {
-                    if self.regs[op.p1 as usize] != self.regs[op.p3 as usize] {
-                        self.pc = op.p2 as usize;
-                    }
+                    let lhs = &self.regs[op.p1 as usize];
+                    let rhs = &self.regs[op.p3 as usize];
+                    let ne = match (lhs.to_real(), rhs.to_real()) {
+                        (Some(a), Some(b)) => a != b,
+                        _ => lhs != rhs,
+                    };
+                    if ne { self.pc = op.p2 as usize; }
                 }
+                // Comparison semantics: Gt P1 P2 P3 → jump to P2 if reg[P1] > reg[P3]
                 Opcode::Lt => {
-                    if let (Some(a), Some(b)) = (self.regs[op.p3 as usize].to_real(), self.regs[op.p1 as usize].to_real()) {
+                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_real(), self.regs[op.p3 as usize].to_real()) {
                         if a < b { self.pc = op.p2 as usize; }
                     }
                 }
                 Opcode::Le => {
-                    if let (Some(a), Some(b)) = (self.regs[op.p3 as usize].to_real(), self.regs[op.p1 as usize].to_real()) {
+                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_real(), self.regs[op.p3 as usize].to_real()) {
                         if a <= b { self.pc = op.p2 as usize; }
                     }
                 }
                 Opcode::Gt => {
-                    if let (Some(a), Some(b)) = (self.regs[op.p3 as usize].to_real(), self.regs[op.p1 as usize].to_real()) {
+                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_real(), self.regs[op.p3 as usize].to_real()) {
                         if a > b { self.pc = op.p2 as usize; }
                     }
                 }
                 Opcode::Ge => {
-                    if let (Some(a), Some(b)) = (self.regs[op.p3 as usize].to_real(), self.regs[op.p1 as usize].to_real()) {
+                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_real(), self.regs[op.p3 as usize].to_real()) {
                         if a >= b { self.pc = op.p2 as usize; }
                     }
                 }
@@ -492,11 +502,19 @@ impl Vdbe {
 
                 Opcode::Next => {
                     // p1 = cursor slot, p2 = jump addr back to loop top
+                    // p5 = 1 when this follows a Delete (cursor already repositioned)
                     let cursor_idx = op.p1 as usize;
                     let loop_addr = op.p2 as usize;
+                    let after_delete = op.p5 != 0;
                     let cursor = cursors[cursor_idx].as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
-                    let has_next = cursor.next()?;
+                    let has_next = if after_delete && cursor.is_valid() {
+                        // The cursor was repositioned by delete() to the next row;
+                        // do NOT advance — just jump back to the loop body.
+                        true
+                    } else {
+                        cursor.next()?
+                    };
                     if has_next {
                         self.pc = loop_addr;
                     }
@@ -600,6 +618,127 @@ impl Vdbe {
                     }
                 }
 
+                // ── Mutation opcodes ───────────────────────────────────────────
+
+                Opcode::Delete => {
+                    // Delete the row at the current cursor position.
+                    // p1 = cursor slot
+                    let cursor_idx = op.p1 as usize;
+                    let cursor = cursors[cursor_idx].as_mut()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    cursor.delete()?;
+                }
+
+                // ── Seek opcodes ───────────────────────────────────────────────
+                // p1 = cursor, p2 = jump addr on miss, p3 = key register
+
+                Opcode::SeekGe => {
+                    // Seek to first row with key >= register[p3].
+                    // Jump to p2 if not found (table exhausted).
+                    let cursor_idx = op.p1 as usize;
+                    let jump_addr  = op.p2 as usize;
+                    let key_reg    = op.p3 as usize;
+                    let rowid = match &self.regs[key_reg] {
+                        Mem::Int(i) => *i as u64,
+                        _ => return Err(VdbeError::Exec("SeekGe: key must be integer".to_string())),
+                    };
+                    let cursor = cursors[cursor_idx].as_mut()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    let result = cursor.move_to(&rowid.to_be_bytes(), SeekBias::Ge)?;
+                    if matches!(result, SeekResult::Empty | SeekResult::Less) {
+                        self.pc = jump_addr;
+                    }
+                }
+
+                Opcode::SeekGt => {
+                    // Seek to first row with key > register[p3].
+                    // Jump to p2 if not found.
+                    let cursor_idx = op.p1 as usize;
+                    let jump_addr  = op.p2 as usize;
+                    let key_reg    = op.p3 as usize;
+                    let rowid = match &self.regs[key_reg] {
+                        Mem::Int(i) => *i as u64,
+                        _ => return Err(VdbeError::Exec("SeekGt: key must be integer".to_string())),
+                    };
+                    let cursor = cursors[cursor_idx].as_mut()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    let result = cursor.move_to(&rowid.to_be_bytes(), SeekBias::Gt)?;
+                    if matches!(result, SeekResult::Empty | SeekResult::Less | SeekResult::Equal) {
+                        // Gt: we need strictly greater; if Equal, step next
+                        if matches!(result, SeekResult::Equal) {
+                            if !cursor.next()? {
+                                self.pc = jump_addr;
+                            }
+                        } else {
+                            self.pc = jump_addr;
+                        }
+                    }
+                }
+
+                Opcode::SeekLe => {
+                    // Seek to last row with key <= register[p3].
+                    // Jump to p2 if not found.
+                    let cursor_idx = op.p1 as usize;
+                    let jump_addr  = op.p2 as usize;
+                    let key_reg    = op.p3 as usize;
+                    let rowid = match &self.regs[key_reg] {
+                        Mem::Int(i) => *i as u64,
+                        _ => return Err(VdbeError::Exec("SeekLe: key must be integer".to_string())),
+                    };
+                    let cursor = cursors[cursor_idx].as_mut()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    let result = cursor.move_to(&rowid.to_be_bytes(), SeekBias::Ge)?;
+                    match result {
+                        SeekResult::Empty => { self.pc = jump_addr; }
+                        SeekResult::Greater => {
+                            // Landed past target — step back one
+                            if !cursor.previous()? { self.pc = jump_addr; }
+                        }
+                        _ => {} // Equal or Less-than-or-equal: stay
+                    }
+                }
+
+                Opcode::SeekLt => {
+                    // Seek to last row with key < register[p3].
+                    // Jump to p2 if not found.
+                    let cursor_idx = op.p1 as usize;
+                    let jump_addr  = op.p2 as usize;
+                    let key_reg    = op.p3 as usize;
+                    let rowid = match &self.regs[key_reg] {
+                        Mem::Int(i) => *i as u64,
+                        _ => return Err(VdbeError::Exec("SeekLt: key must be integer".to_string())),
+                    };
+                    let cursor = cursors[cursor_idx].as_mut()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    let result = cursor.move_to(&rowid.to_be_bytes(), SeekBias::Ge)?;
+                    match result {
+                        SeekResult::Empty => { self.pc = jump_addr; }
+                        // Landed at or past target — step back
+                        SeekResult::Equal | SeekResult::Greater => {
+                            if !cursor.previous()? { self.pc = jump_addr; }
+                        }
+                        SeekResult::Less => {} // already before target
+                    }
+                }
+
+                Opcode::InsertInt => {
+                    // Convenience: same as Insert but rowid comes from p3 directly (integer).
+                    // p1 = cursor, p2 = record_reg, p3 = rowid (integer literal, not a register)
+                    let cursor_idx = op.p1 as usize;
+                    let record_reg = op.p2 as usize;
+                    let rowid = op.p3 as u64;
+                    let record = if let Mem::Blob(b) = &self.regs[record_reg] {
+                        b.clone()
+                    } else {
+                        return Err(VdbeError::Exec("record must be blob".to_string()));
+                    };
+                    if let Some(cursor) = &mut cursors[cursor_idx] {
+                        cursor.insert(&rowid.to_be_bytes(), &record, false)?;
+                    } else {
+                        return Err(VdbeError::Exec("invalid cursor".to_string()));
+                    }
+                }
+
                 Opcode::ResultRow => {
                     self.last_result_row = Some((op.p1 as usize, op.p2 as usize));
                     return Ok(StepResult::Row);
@@ -607,6 +746,7 @@ impl Vdbe {
                 Opcode::Noop => {}
                 _ => return Err(VdbeError::NotImplemented),
             }
+
         }
         
         self.halted = true;

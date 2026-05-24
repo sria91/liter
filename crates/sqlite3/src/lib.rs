@@ -22,6 +22,7 @@
 //! Phase 9 — `Connection::prepare` and `Statement` are fully implemented.
 //! `SELECT … FROM table [WHERE …]`, `CREATE TABLE`, and `INSERT INTO` all work end-to-end.
 
+use std::cell::Cell;
 use std::path::Path;
 
 pub use sqlite3_record::Value;
@@ -103,6 +104,9 @@ pub struct Connection {
     path: String,
     pub btree: sqlite3_btree::BTree,
     pub schema: sqlite3_schema::Schema,
+    /// True when the user has issued an explicit `BEGIN` and we must not
+    /// auto-commit individual DML statements.
+    in_txn: Cell<bool>,
 }
 
 impl Connection {
@@ -114,10 +118,11 @@ impl Connection {
         } else {
             sqlite3_btree::BTree::open(Path::new(path), false)?
         };
-        Ok(Self { 
+        Ok(Self {
             path: path.to_owned(),
             btree,
             schema: sqlite3_schema::Schema::new(),
+            in_txn: Cell::new(false),
         })
     }
 
@@ -127,12 +132,41 @@ impl Connection {
     }
 
     /// Execute a SQL statement, discarding any result rows.
-    pub fn execute(&self, sql: &str, params: impl IntoParams) -> SqliteResult<u64> {
+    pub fn execute(&self, sql: &str, _params: impl IntoParams) -> SqliteResult<u64> {
         let ast = sqlite3_parser::parse_stmt(sql)?;
+
+        // ── Transaction control (no bytecode needed) ──────────────────────────
+        match &ast {
+            sqlite3_ast::Stmt::Begin(_) => {
+                self.btree.begin_write()?;
+                self.in_txn.set(true);
+                return Ok(0);
+            }
+            sqlite3_ast::Stmt::Commit => {
+                self.btree.commit()?;
+                self.in_txn.set(false);
+                return Ok(0);
+            }
+            sqlite3_ast::Stmt::Rollback { .. } => {
+                self.btree.rollback()?;
+                self.in_txn.set(false);
+                return Ok(0);
+            }
+            // Savepoint/Release: forward to btree if supported, else no-op for now.
+            sqlite3_ast::Stmt::Savepoint(_) | sqlite3_ast::Stmt::Release(_) => {
+                return Ok(0);
+            }
+            _ => {}
+        }
+
         let is_create = matches!(&ast, sqlite3_ast::Stmt::Create(_));
         let mut vm = sqlite3_codegen::compile_with_schema(&ast, &self.schema)?;
 
-        self.btree.begin_write()?;
+        // Only auto-begin/commit when NOT inside a user transaction.
+        let auto_txn = !self.in_txn.get();
+        if auto_txn {
+            self.btree.begin_write()?;
+        }
         
         let mut cursors: Vec<Option<sqlite3_btree::BTreeCursor>> = Vec::with_capacity(vm.n_cursors);
         for _ in 0..vm.n_cursors { cursors.push(None); }
@@ -158,11 +192,11 @@ impl Connection {
         })();
 
         if res.is_err() {
-            let _ = self.btree.rollback();
+            if auto_txn { let _ = self.btree.rollback(); }
             return Err(res.unwrap_err());
         }
 
-        self.btree.commit()?;
+        if auto_txn { self.btree.commit()?; }
 
         // If it was a CREATE TABLE statement, insert into the schema catalog.
         if is_create {
@@ -571,5 +605,108 @@ mod tests {
         assert_eq!(stmt.column_value(0).unwrap(), Value::Int(100));
         assert_eq!(stmt.column_value(1).unwrap(), Value::Text(b"hello".to_vec()));
         assert_eq!(stmt.step().unwrap(), StepResult::Done);
+    }
+
+    // ── Phase 10: DELETE, UPDATE, AND/OR, Transactions ────────────────────────
+
+    #[test]
+    fn test_delete_all() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE d (x INTEGER)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO d VALUES (1)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO d VALUES (2)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO d VALUES (3)", [] as [(); 0]).unwrap();
+
+        conn.execute("DELETE FROM d", [] as [(); 0]).unwrap();
+
+        let rows = conn.query("SELECT x FROM d", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 0, "all rows should be deleted");
+    }
+
+    #[test]
+    fn test_delete_where() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE d2 (id INTEGER, val TEXT)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO d2 VALUES (1, 'keep')", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO d2 VALUES (2, 'drop')", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO d2 VALUES (3, 'keep')", [] as [(); 0]).unwrap();
+
+        conn.execute("DELETE FROM d2 WHERE id = 2", [] as [(); 0]).unwrap();
+
+        let rows = conn.query("SELECT id FROM d2", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 2, "only 1 row should be deleted");
+        assert_eq!(rows[0][0], Value::Int(1));
+        assert_eq!(rows[1][0], Value::Int(3));
+    }
+
+    #[test]
+    fn test_update_all() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE u (id INTEGER, score INTEGER)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO u VALUES (1, 10)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO u VALUES (2, 20)", [] as [(); 0]).unwrap();
+
+        conn.execute("UPDATE u SET score = 99", [] as [(); 0]).unwrap();
+
+        let rows = conn.query("SELECT score FROM u", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0], Value::Int(99));
+        assert_eq!(rows[1][0], Value::Int(99));
+    }
+
+    #[test]
+    fn test_update_where() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE u2 (id INTEGER, val TEXT)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO u2 VALUES (1, 'old')", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO u2 VALUES (2, 'old')", [] as [(); 0]).unwrap();
+
+        conn.execute("UPDATE u2 SET val = 'new' WHERE id = 1", [] as [(); 0]).unwrap();
+
+        let rows = conn.query("SELECT id, val FROM u2", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][1], Value::Text(b"new".to_vec()));
+        assert_eq!(rows[1][1], Value::Text(b"old".to_vec()));
+    }
+
+    #[test]
+    fn test_where_and() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE w (a INTEGER, b INTEGER)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO w VALUES (1, 10)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO w VALUES (2, 20)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO w VALUES (3, 30)", [] as [(); 0]).unwrap();
+
+        // a > 1 AND b < 30 should match only row (2, 20)
+        let rows = conn.query("SELECT a FROM w WHERE a > 1 AND b < 30", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Int(2));
+    }
+
+    #[test]
+    fn test_explicit_transaction_commit() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE tx (n INTEGER)", [] as [(); 0]).unwrap();
+
+        conn.execute("BEGIN", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO tx VALUES (42)", [] as [(); 0]).unwrap();
+        conn.execute("COMMIT", [] as [(); 0]).unwrap();
+
+        let rows = conn.query("SELECT n FROM tx", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Int(42));
+    }
+
+    #[test]
+    fn test_explicit_transaction_rollback() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE tx2 (n INTEGER)", [] as [(); 0]).unwrap();
+
+        conn.execute("BEGIN", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO tx2 VALUES (99)", [] as [(); 0]).unwrap();
+        conn.execute("ROLLBACK", [] as [(); 0]).unwrap();
+
+        let rows = conn.query("SELECT n FROM tx2", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 0, "rollback should undo the insert");
     }
 }
