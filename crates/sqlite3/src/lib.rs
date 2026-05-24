@@ -19,9 +19,8 @@
 //! ```
 //!
 //! ## Status
-//! Phase 0/1 scaffold — `Connection::open` and `Connection::open_in_memory` are
-//! available; all query methods return `Err(SqliteError::NotImplemented)` until
-//! the VDBE and storage layers are wired together.
+//! Phase 9 — `Connection::prepare` and `Statement` are fully implemented.
+//! `SELECT … FROM table [WHERE …]`, `CREATE TABLE`, and `INSERT INTO` all work end-to-end.
 
 use std::path::Path;
 
@@ -238,9 +237,20 @@ impl Connection {
     }
 
     /// Prepare a SQL statement for repeated execution.
-    pub fn prepare(&self, sql: &str) -> SqliteResult<Statement<'_>> {
-        let _ = sql;
-        Err(SqliteError::NotImplemented)
+    ///
+    /// The returned `Statement` borrows from this connection. Call
+    /// `stmt.step()` to drive execution row by row.
+    pub fn prepare<'c>(&'c self, sql: &str) -> SqliteResult<Statement<'c>> {
+        let ast = sqlite3_parser::parse_stmt(sql)?;
+        let vm = sqlite3_codegen::compile_with_schema(&ast, &self.schema)?;
+        let n = vm.n_cursors;
+        Ok(Statement {
+            conn: self,
+            vm,
+            cursors: (0..n).map(|_| None).collect(),
+            column_cache: Vec::new(),
+            done: false,
+        })
     }
 
     /// Path this connection was opened with.
@@ -260,22 +270,88 @@ fn mem_to_value(mem: &sqlite3_vdbe::Mem) -> Value {
     }
 }
 
-/// A prepared SQL statement.
+/// A prepared SQL statement tied to its originating `Connection`.
+///
+/// Call `step()` repeatedly: it returns `Ok(StepResult::Row)` for each
+/// result row (retrieve values via `column_value`) and `Ok(StepResult::Done)`
+/// when execution is complete. Call `reset()` to rewind for re-execution.
 pub struct Statement<'conn> {
-    _conn: &'conn Connection,
+    conn: &'conn Connection,
+    vm: sqlite3_vdbe::Vdbe,
+    /// One slot per cursor allocated by the compiled program.
+    /// Cursor lifetime is tied to `conn.btree` via `'conn`.
+    cursors: Vec<Option<sqlite3_btree::BTreeCursor<'conn>>>,
+    /// Snapshot of the last yielded row (avoids borrow on vm after step).
+    column_cache: Vec<Value>,
+    done: bool,
 }
 
 impl Statement<'_> {
+    /// Drive the VM one step.
+    ///
+    /// Returns `Ok(StepResult::Row)` when a row is available and
+    /// `Ok(StepResult::Done)` when all rows have been produced.
     pub fn step(&mut self) -> SqliteResult<StepResult> {
-        Err(SqliteError::NotImplemented)
+        if self.done {
+            return Ok(StepResult::Done);
+        }
+        // SAFETY-note: we transmute the cursor lifetime from 'conn to 'static
+        // here only conceptually — the cursors actually reference conn.btree
+        // which lives at least as long as Statement<'conn>. We express this
+        // through the 'conn lifetime on Statement. The transmute below is the
+        // standard workaround for the self-referential pattern until Rust gains
+        // async-fn-in-trait with captured borrows.
+        //
+        // ALTERNATIVE (chosen): Pass `&self.conn.btree` and let Rust verify the
+        // lifetime matches the cursor slice's element lifetime 'conn. This works
+        // because both Statement and cursors carry the same 'conn lifetime.
+        let result = self.vm.step(
+            &self.conn.btree,
+            // Cast the slice from &mut [Option<BTreeCursor<'conn>>] to
+            // &mut [Option<BTreeCursor<'_>>] — Rust coerces this through
+            // lifetime subtyping because 'conn outlives the borrow.
+            &mut self.cursors,
+        )?;
+
+        match result {
+            sqlite3_vdbe::StepResult::Row => {
+                // Cache the current row so column_value() can return values
+                // without holding a borrow on `self.vm` simultaneously.
+                self.column_cache = if let Some(row) = self.vm.current_result_row() {
+                    row.iter().map(mem_to_value).collect()
+                } else {
+                    Vec::new()
+                };
+                Ok(StepResult::Row)
+            }
+            sqlite3_vdbe::StepResult::Done => {
+                self.done = true;
+                self.column_cache.clear();
+                Ok(StepResult::Done)
+            }
+        }
     }
 
+    /// Reset the statement so it can be re-executed from the beginning.
     pub fn reset(&mut self) -> SqliteResult<()> {
-        Err(SqliteError::NotImplemented)
+        self.vm.reset()?;
+        for slot in &mut self.cursors {
+            *slot = None;
+        }
+        self.column_cache.clear();
+        self.done = false;
+        Ok(())
     }
 
-    pub fn column_value(&self, _col: usize) -> SqliteResult<Value> {
-        Err(SqliteError::NotImplemented)
+    /// Return the value of column `col` (0-indexed) from the last `Row` result.
+    pub fn column_value(&self, col: usize) -> SqliteResult<Value> {
+        self.column_cache.get(col).cloned()
+            .ok_or_else(|| SqliteError::Sql(format!("column index {} out of range", col)))
+    }
+
+    /// Return the number of result columns in this statement.
+    pub fn column_count(&self) -> usize {
+        self.column_cache.len()
     }
 }
 
@@ -386,5 +462,114 @@ mod tests {
     fn open_in_memory() {
         let conn = Connection::open_in_memory().unwrap();
         assert_eq!(conn.path(), ":memory:");
+    }
+
+    #[test]
+    fn test_select_from_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE users (id INTEGER, name TEXT)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO users VALUES (1, 'alice')", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO users VALUES (2, 'bob')", [] as [(); 0]).unwrap();
+
+        let rows = conn.query("SELECT id, name FROM users", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 2, "expected 2 rows, got {}", rows.len());
+        assert_eq!(rows[0][0], Value::Int(1));
+        assert_eq!(rows[0][1], Value::Text(b"alice".to_vec()));
+        assert_eq!(rows[1][0], Value::Int(2));
+        assert_eq!(rows[1][1], Value::Text(b"bob".to_vec()));
+    }
+
+    #[test]
+    fn test_select_star_from_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE items (x INTEGER, y INTEGER)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO items VALUES (10, 20)", [] as [(); 0]).unwrap();
+
+        let rows = conn.query("SELECT * FROM items", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Int(10));
+        assert_eq!(rows[0][1], Value::Int(20));
+    }
+
+    #[test]
+    fn test_select_from_where() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER, val TEXT)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 'a')", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO t VALUES (2, 'b')", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO t VALUES (3, 'c')", [] as [(); 0]).unwrap();
+
+        // WHERE with equality — should return only id=2
+        let rows = conn.query("SELECT id, val FROM t WHERE id = 2", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 1, "expected 1 matching row, got {}", rows.len());
+        assert_eq!(rows[0][0], Value::Int(2));
+        assert_eq!(rows[0][1], Value::Text(b"b".to_vec()));
+    }
+
+    #[test]
+    fn test_select_from_empty_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE empty (id INTEGER)", [] as [(); 0]).unwrap();
+        let rows = conn.query("SELECT id FROM empty", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 0, "expected 0 rows from empty table");
+    }
+
+    // ── Phase 9: Statement API ────────────────────────────────────────────────
+
+    #[test]
+    fn test_prepare_step_column_value() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE p (x INTEGER, y TEXT)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO p VALUES (1, 'one')", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO p VALUES (2, 'two')", [] as [(); 0]).unwrap();
+
+        let mut stmt = conn.prepare("SELECT x, y FROM p").unwrap();
+
+        // First row
+        assert_eq!(stmt.step().unwrap(), StepResult::Row);
+        assert_eq!(stmt.column_count(), 2);
+        assert_eq!(stmt.column_value(0).unwrap(), Value::Int(1));
+        assert_eq!(stmt.column_value(1).unwrap(), Value::Text(b"one".to_vec()));
+
+        // Second row
+        assert_eq!(stmt.step().unwrap(), StepResult::Row);
+        assert_eq!(stmt.column_value(0).unwrap(), Value::Int(2));
+        assert_eq!(stmt.column_value(1).unwrap(), Value::Text(b"two".to_vec()));
+
+        // Done
+        assert_eq!(stmt.step().unwrap(), StepResult::Done);
+        // Calling step again after Done returns Done
+        assert_eq!(stmt.step().unwrap(), StepResult::Done);
+    }
+
+    #[test]
+    fn test_statement_reset() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE r (n INTEGER)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO r VALUES (42)", [] as [(); 0]).unwrap();
+
+        let mut stmt = conn.prepare("SELECT n FROM r").unwrap();
+
+        // First run
+        assert_eq!(stmt.step().unwrap(), StepResult::Row);
+        assert_eq!(stmt.column_value(0).unwrap(), Value::Int(42));
+        assert_eq!(stmt.step().unwrap(), StepResult::Done);
+
+        // Reset and re-run
+        stmt.reset().unwrap();
+        assert_eq!(stmt.step().unwrap(), StepResult::Row);
+        assert_eq!(stmt.column_value(0).unwrap(), Value::Int(42));
+        assert_eq!(stmt.step().unwrap(), StepResult::Done);
+    }
+
+    #[test]
+    fn test_prepare_literal_select() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut stmt = conn.prepare("SELECT 100, 'hello'").unwrap();
+
+        assert_eq!(stmt.step().unwrap(), StepResult::Row);
+        assert_eq!(stmt.column_value(0).unwrap(), Value::Int(100));
+        assert_eq!(stmt.column_value(1).unwrap(), Value::Text(b"hello".to_vec()));
+        assert_eq!(stmt.step().unwrap(), StepResult::Done);
     }
 }

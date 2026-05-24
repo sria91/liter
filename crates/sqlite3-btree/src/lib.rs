@@ -335,6 +335,25 @@ impl BTreeCursor<'_> {
     pub fn is_valid(&self) -> bool { self.state == CursorState::Valid }
     pub fn root_page(&self) -> PageNumber { self.root_page }
 
+    /// Return the integer rowid of the current position.
+    /// The key is stored as an 8-byte big-endian `u64`; reinterpret as `i64`.
+    pub fn rowid(&self) -> BTreeResult<i64> {
+        let k = self.key()?;
+        if k.len() != 8 { return Err(BTreeError::Corrupt); }
+        let raw = u64::from_be_bytes(k.try_into().unwrap());
+        Ok(raw as i64)
+    }
+
+    /// Return the maximum rowid in this table (rowid of the last entry).
+    /// Returns `0` if the table is empty.
+    pub fn max_rowid(&mut self) -> BTreeResult<i64> {
+        if self.move_to_last()? {
+            self.rowid()
+        } else {
+            Ok(0)
+        }
+    }
+
     // ── Write ops ─────────────────────────────────────────────────────────────
 
     /// Insert `(rowid, payload)` into a table leaf.

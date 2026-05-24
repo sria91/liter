@@ -24,6 +24,19 @@ pub enum Mem {
 impl Mem {
     pub fn is_null(&self) -> bool { matches!(self, Mem::Null) }
 
+    /// True if the value is considered "true" in a boolean context
+    /// (non-null, non-zero integer, non-zero real).
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Mem::Null => false,
+            Mem::Int(i) => *i != 0,
+            Mem::Real(f) => *f != 0.0,
+            Mem::Text(s) => !s.is_empty(),
+            Mem::Blob(b) => !b.is_empty(),
+            Mem::ZeroBlob(_) => false,
+        }
+    }
+
     pub fn to_int(&self) -> Option<i64> {
         match self {
             Mem::Int(i) => Some(*i),
@@ -142,10 +155,16 @@ pub enum Opcode {
     Delete,
     RowId,
     NewRowid,
+    NullRow,
     // Schema
     CreateTable,
     // Result output
     ResultRow,
+    // Branching
+    If,
+    IfNot,
+    IsNull,
+    NotNull,
     // Aggregation
     AggStep,
     AggFinal,
@@ -446,6 +465,141 @@ impl Vdbe {
                         cursors[cursor_idx] = None;
                     }
                 }
+
+                // ── Read-scan opcodes ──────────────────────────────────────────
+
+                Opcode::OpenRead => {
+                    // p1 = cursor slot, p2 = root page number
+                    let cursor_idx = op.p1 as usize;
+                    let root_page = op.p2 as u32;
+                    if cursor_idx >= cursors.len() {
+                        return Err(VdbeError::Exec("cursor index out of bounds".to_string()));
+                    }
+                    cursors[cursor_idx] = Some(btree.cursor(root_page, false)?);
+                }
+
+                Opcode::Rewind => {
+                    // p1 = cursor slot, p2 = jump addr if table is empty
+                    let cursor_idx = op.p1 as usize;
+                    let jump_addr = op.p2 as usize;
+                    let cursor = cursors[cursor_idx].as_mut()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    let has_rows = cursor.move_to_first()?;
+                    if !has_rows {
+                        self.pc = jump_addr;
+                    }
+                }
+
+                Opcode::Next => {
+                    // p1 = cursor slot, p2 = jump addr back to loop top
+                    let cursor_idx = op.p1 as usize;
+                    let loop_addr = op.p2 as usize;
+                    let cursor = cursors[cursor_idx].as_mut()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    let has_next = cursor.next()?;
+                    if has_next {
+                        self.pc = loop_addr;
+                    }
+                }
+
+                Opcode::Prev => {
+                    // p1 = cursor slot, p2 = jump addr back to loop top
+                    let cursor_idx = op.p1 as usize;
+                    let loop_addr = op.p2 as usize;
+                    let cursor = cursors[cursor_idx].as_mut()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    let has_prev = cursor.previous()?;
+                    if has_prev {
+                        self.pc = loop_addr;
+                    }
+                }
+
+                Opcode::Last => {
+                    // p1 = cursor slot, p2 = jump addr if empty
+                    let cursor_idx = op.p1 as usize;
+                    let jump_addr = op.p2 as usize;
+                    let cursor = cursors[cursor_idx].as_mut()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    let has_rows = cursor.move_to_last()?;
+                    if !has_rows {
+                        self.pc = jump_addr;
+                    }
+                }
+
+                Opcode::Column => {
+                    // p1 = cursor slot, p2 = column index, p3 = dest register
+                    let cursor_idx = op.p1 as usize;
+                    let col_idx = op.p2 as usize;
+                    let dest_reg = op.p3 as usize;
+                    let cursor = cursors[cursor_idx].as_ref()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    let data = cursor.data()?;
+                    let fields = sqlite3_record::decode_record(data)?;
+                    let val = fields.into_iter().nth(col_idx)
+                        .unwrap_or(sqlite3_record::Value::Null);
+                    self.regs[dest_reg] = match val {
+                        sqlite3_record::Value::Null => Mem::Null,
+                        sqlite3_record::Value::Int(i) => Mem::Int(i),
+                        sqlite3_record::Value::Real(f) => Mem::Real(f),
+                        sqlite3_record::Value::Text(b) => {
+                            let s = String::from_utf8_lossy(&b);
+                            Mem::Text(Arc::from(s.as_ref()))
+                        }
+                        sqlite3_record::Value::Blob(b) => Mem::Blob(Arc::from(b.into_boxed_slice())),
+                        sqlite3_record::Value::ZeroBlob(n) => Mem::ZeroBlob(n),
+                    };
+                }
+
+                Opcode::RowId => {
+                    // p1 = cursor slot, p2 = dest register
+                    let cursor_idx = op.p1 as usize;
+                    let dest_reg = op.p2 as usize;
+                    let cursor = cursors[cursor_idx].as_ref()
+                        .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
+                    self.regs[dest_reg] = Mem::Int(cursor.rowid()?);
+                }
+
+                Opcode::NullRow => {
+                    // Mark cursor p1 as pointing at a null/synthetic row.
+                    // For now this is a no-op at the VDBE level; the effect is
+                    // that Column ops on this cursor will return Null.
+                    // We model it by closing the cursor (making it return Null from data()).
+                    let cursor_idx = op.p1 as usize;
+                    if cursor_idx < cursors.len() {
+                        cursors[cursor_idx] = None;
+                    }
+                }
+
+                // ── Conditional branching ──────────────────────────────────────
+
+                Opcode::If => {
+                    // Jump to p2 if register p1 is truthy
+                    if self.regs[op.p1 as usize].is_truthy() {
+                        self.pc = op.p2 as usize;
+                    }
+                }
+
+                Opcode::IfNot => {
+                    // Jump to p2 if register p1 is falsy
+                    if !self.regs[op.p1 as usize].is_truthy() {
+                        self.pc = op.p2 as usize;
+                    }
+                }
+
+                Opcode::IsNull => {
+                    // Jump to p2 if register p1 is NULL
+                    if self.regs[op.p1 as usize].is_null() {
+                        self.pc = op.p2 as usize;
+                    }
+                }
+
+                Opcode::NotNull => {
+                    // Jump to p2 if register p1 is NOT NULL
+                    if !self.regs[op.p1 as usize].is_null() {
+                        self.pc = op.p2 as usize;
+                    }
+                }
+
                 Opcode::ResultRow => {
                     self.last_result_row = Some((op.p1 as usize, op.p2 as usize));
                     return Ok(StepResult::Row);
