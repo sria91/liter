@@ -150,12 +150,12 @@ impl VfsFile for UnixFile {
 #[cfg(unix)]
 fn fcntl_lock(
     fd: std::os::unix::io::RawFd,
-    lock_type: libc::c_short,
+    lock_type: libc::c_int,
     start: i64,
     len: i64,
 ) -> io::Result<()> {
     let flock = libc::flock {
-        l_type: lock_type,
+        l_type: lock_type as _,
         l_whence: libc::SEEK_SET as libc::c_short,
         l_start: start as libc::off_t,
         l_len: len as libc::off_t,
@@ -174,12 +174,12 @@ fn fcntl_lock(
 #[cfg(unix)]
 fn fcntl_has_lock(
     fd: std::os::unix::io::RawFd,
-    lock_type: libc::c_short,
+    lock_type: libc::c_int,
     start: i64,
     len: i64,
 ) -> io::Result<bool> {
     let mut flock = libc::flock {
-        l_type: lock_type,
+        l_type: lock_type as _,
         l_whence: libc::SEEK_SET as libc::c_short,
         l_start: start as libc::off_t,
         l_len: len as libc::off_t,
