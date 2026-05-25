@@ -52,7 +52,7 @@ impl Fts5Tokenizer for AsciiTokenizer {
 }
 
 /// A specialized Virtual Table representing an FTS5 index.
-/// 
+///
 /// In a full implementation, this table manages auxiliary B-Tree pages containing
 /// the inverted term indices and BM25 document rankings.
 pub struct Fts5Table {
@@ -98,7 +98,7 @@ pub fn bm25_score(
 }
 
 /// Defines the names of the shadow tables created by an FTS5 virtual table.
-/// 
+///
 /// If the vtab is named `xyz`, the shadow tables are:
 /// - `xyz_data`: Stores the actual inverted index B-Tree nodes.
 /// - `xyz_idx`: Stores the mapping from terms to `xyz_data` segment blocks.

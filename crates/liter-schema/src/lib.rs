@@ -7,8 +7,8 @@
 //! ## Status
 //! Phase 3 — stub skeleton.
 
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
 /// The type of a schema object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +58,10 @@ impl Schema {
     }
 
     pub fn tables(&self) -> Vec<SchemaObject> {
-        self.all().into_iter().filter(|o| o.kind == ObjectKind::Table).collect()
+        self.all()
+            .into_iter()
+            .filter(|o| o.kind == ObjectKind::Table)
+            .collect()
     }
 
     pub fn indexes_for(&self, table: &str) -> Vec<SchemaObject> {
@@ -80,13 +83,11 @@ mod tests {
             tbl_name: name.to_owned(),
             root_page: 2,
             sql: Some(format!("CREATE TABLE {name} (id INTEGER PRIMARY KEY)")),
-            columns: vec![
-                liter_ast::ColumnDef {
-                    name: "id".to_string(),
-                    type_name: None,
-                    constraints: vec![],
-                }
-            ],
+            columns: vec![liter_ast::ColumnDef {
+                name: "id".to_string(),
+                type_name: None,
+                constraints: vec![],
+            }],
         }
     }
 

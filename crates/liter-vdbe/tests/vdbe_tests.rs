@@ -1,5 +1,5 @@
-use liter_vdbe::{Mem, Opcode, P4, StepResult, Vdbe, VdbeOp};
 use liter_btree::BTree;
+use liter_vdbe::{Mem, Opcode, StepResult, Vdbe, VdbeOp, P4};
 
 #[test]
 fn test_vdbe_math() {
@@ -57,7 +57,7 @@ fn test_vdbe_math() {
     });
 
     assert_eq!(vm.step(&btree, &mut cursors).unwrap(), StepResult::Row);
-    
+
     let row = vm.current_result_row().unwrap();
     assert_eq!(row.len(), 1);
     assert_eq!(row[0], Mem::Int(8));
@@ -176,7 +176,7 @@ fn test_vdbe_loop() {
         opcode: Opcode::Gt,
         p1: r0_gt_0 as i32, // b is 0
         p2: loop_start as i32,
-        p3: 0,              // a is counter
+        p3: 0, // a is counter
         p4: P4::None,
         p5: 0,
     });
@@ -204,26 +204,35 @@ fn test_vdbe_types() {
 
     vm.emit(VdbeOp {
         opcode: Opcode::Real,
-        p1: 0, p2: 0, p3: 0,
+        p1: 0,
+        p2: 0,
+        p3: 0,
         p4: P4::Real(std::f64::consts::PI),
         p5: 0,
     });
     vm.emit(VdbeOp {
         opcode: Opcode::String8,
-        p1: 0, p2: 1, p3: 0,
+        p1: 0,
+        p2: 1,
+        p3: 0,
         p4: P4::Text(std::sync::Arc::from("hello")),
         p5: 0,
     });
     vm.emit(VdbeOp {
         opcode: Opcode::Null,
-        p1: 0, p2: 2, p3: 0,
+        p1: 0,
+        p2: 2,
+        p3: 0,
         p4: P4::None,
         p5: 0,
     });
     vm.emit(VdbeOp {
         opcode: Opcode::ResultRow,
-        p1: 0, p2: 3, p3: 0,
-        p4: P4::None, p5: 0,
+        p1: 0,
+        p2: 3,
+        p3: 0,
+        p4: P4::None,
+        p5: 0,
     });
 
     assert_eq!(vm.step(&btree, &mut cursors).unwrap(), StepResult::Row);

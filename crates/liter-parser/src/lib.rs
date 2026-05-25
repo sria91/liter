@@ -22,7 +22,8 @@ pub enum ParseError {
 
 pub type ParseResult<T> = Result<T, ParseError>;
 
-type TokenIter<'a> = Box<dyn Iterator<Item = Result<(Token<'a>, std::ops::Range<usize>), TokenError>> + 'a>;
+type TokenIter<'a> =
+    Box<dyn Iterator<Item = Result<(Token<'a>, std::ops::Range<usize>), TokenError>> + 'a>;
 
 /// Recursive-descent SQL Parser
 pub struct Parser<'a> {
@@ -32,7 +33,9 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     pub fn new(input: &'a str) -> Self {
         let iter: TokenIter<'a> = Box::new(tokenize(input));
-        Self { iter: iter.peekable() }
+        Self {
+            iter: iter.peekable(),
+        }
     }
 
     pub fn parse_all(&mut self) -> ParseResult<Vec<Stmt>> {
@@ -49,13 +52,17 @@ impl<'a> Parser<'a> {
     pub fn parse_stmt(&mut self) -> ParseResult<Stmt> {
         let tok = self.peek()?.cloned();
         match tok {
-            Some(Token::Select)   => Ok(Stmt::Select(Box::new(self.parse_select_stmt()?))),
-            Some(Token::Create)   => self.parse_create_stmt(),
-            Some(Token::Insert)   => self.parse_insert_stmt(),
-            Some(Token::Update)   => self.parse_update_stmt(),
-            Some(Token::Delete)   => self.parse_delete_stmt(),
-            Some(Token::Begin)    => self.parse_transaction_stmt(),
-            Some(Token::Commit)   => { self.consume()?; self.consume_optional(Token::Transaction); Ok(Stmt::Commit) }
+            Some(Token::Select) => Ok(Stmt::Select(Box::new(self.parse_select_stmt()?))),
+            Some(Token::Create) => self.parse_create_stmt(),
+            Some(Token::Insert) => self.parse_insert_stmt(),
+            Some(Token::Update) => self.parse_update_stmt(),
+            Some(Token::Delete) => self.parse_delete_stmt(),
+            Some(Token::Begin) => self.parse_transaction_stmt(),
+            Some(Token::Commit) => {
+                self.consume()?;
+                self.consume_optional(Token::Transaction);
+                Ok(Stmt::Commit)
+            }
             Some(Token::Rollback) => {
                 self.consume()?;
                 self.consume_optional(Token::Transaction);
@@ -63,7 +70,9 @@ impl<'a> Parser<'a> {
                     self.consume()?;
                     self.consume_optional(Token::Savepoint);
                     Some(self.expect_ident()?)
-                } else { None };
+                } else {
+                    None
+                };
                 Ok(Stmt::Rollback { savepoint })
             }
             Some(Token::Savepoint) => {
@@ -75,7 +84,10 @@ impl<'a> Parser<'a> {
                 self.consume_optional(Token::Savepoint);
                 Ok(Stmt::Release(self.expect_ident()?))
             }
-            Some(tok) => Err(ParseError::SyntaxError(format!("Unexpected token starting statement: {:?}", tok))),
+            Some(tok) => Err(ParseError::SyntaxError(format!(
+                "Unexpected token starting statement: {:?}",
+                tok
+            ))),
             None => Err(ParseError::UnexpectedEof),
         }
     }
@@ -83,9 +95,18 @@ impl<'a> Parser<'a> {
     fn parse_transaction_stmt(&mut self) -> ParseResult<Stmt> {
         self.expect(Token::Begin)?;
         let kind = match self.peek()? {
-            Some(Token::Deferred)  => { self.consume()?; TransactionKind::Deferred }
-            Some(Token::Immediate) => { self.consume()?; TransactionKind::Immediate }
-            Some(Token::Exclusive) => { self.consume()?; TransactionKind::Exclusive }
+            Some(Token::Deferred) => {
+                self.consume()?;
+                TransactionKind::Deferred
+            }
+            Some(Token::Immediate) => {
+                self.consume()?;
+                TransactionKind::Immediate
+            }
+            Some(Token::Exclusive) => {
+                self.consume()?;
+                TransactionKind::Exclusive
+            }
             _ => TransactionKind::Deferred,
         };
         self.consume_optional(Token::Transaction);
@@ -107,7 +128,6 @@ impl<'a> Parser<'a> {
         }
         Ok(false)
     }
-
 
     fn parse_select_stmt(&mut self) -> ParseResult<SelectStmt> {
         self.expect(Token::Select)?;
@@ -175,7 +195,10 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            from = Some(FromClause { tables, joins: vec![] });
+            from = Some(FromClause {
+                tables,
+                joins: vec![],
+            });
         }
 
         let mut where_ = None;
@@ -219,7 +242,9 @@ impl<'a> Parser<'a> {
                     } else if self.consume_if(Token::Last)? {
                         nulls = NullsOrder::Last;
                     } else {
-                        return Err(ParseError::SyntaxError("expected FIRST or LAST after NULLS".to_string()));
+                        return Err(ParseError::SyntaxError(
+                            "expected FIRST or LAST after NULLS".to_string(),
+                        ));
                     }
                 }
 
@@ -299,7 +324,7 @@ impl<'a> Parser<'a> {
         loop {
             let col_name = self.expect_ident()?;
             let mut type_name = None;
-            
+
             // Check if the next token is an identifier for the type
             if let Some(Token::Ident(t)) = self.peek()? {
                 type_name = Some(TypeName {
@@ -308,12 +333,12 @@ impl<'a> Parser<'a> {
                 });
                 self.consume()?;
             } else if let Some(Token::Integer(t)) = self.peek()? {
-                 // Hack for types like INT
-                 type_name = Some(TypeName {
-                     name: t.to_string(),
-                     args: vec![],
-                 });
-                 self.consume()?;
+                // Hack for types like INT
+                type_name = Some(TypeName {
+                    name: t.to_string(),
+                    args: vec![],
+                });
+                self.consume()?;
             }
 
             let mut constraints = Vec::new();
@@ -322,12 +347,15 @@ impl<'a> Parser<'a> {
                     self.consume()?;
                     self.expect(Token::Key)?;
                     let mut direction = None;
-                    if self.consume_if(Token::Asc)? { direction = Some(SortDirection::Asc); }
-                    else if self.consume_if(Token::Desc)? { direction = Some(SortDirection::Desc); }
-                    
+                    if self.consume_if(Token::Asc)? {
+                        direction = Some(SortDirection::Asc);
+                    } else if self.consume_if(Token::Desc)? {
+                        direction = Some(SortDirection::Desc);
+                    }
+
                     let conflict = None; // TODO: conflict clause
                     let autoincrement = self.consume_if(Token::Autoincrement)?;
-                    
+
                     constraints.push(ColumnConstraint::PrimaryKey {
                         direction,
                         conflict,
@@ -373,7 +401,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::Insert)?;
         self.expect(Token::Into)?;
         let table = self.expect_ident()?;
-        
+
         let mut columns = Vec::new();
         if let Some(Token::LParen) = self.peek()? {
             self.consume()?;
@@ -587,8 +615,14 @@ impl<'a> Parser<'a> {
         match tok {
             Token::Or => (1, 2),
             Token::And => (3, 4),
-            Token::Eq | Token::EqEq | Token::Ne | Token::BangEq
-            | Token::Lt | Token::Le | Token::Gt | Token::Ge => (5, 6),
+            Token::Eq
+            | Token::EqEq
+            | Token::Ne
+            | Token::BangEq
+            | Token::Lt
+            | Token::Le
+            | Token::Gt
+            | Token::Ge => (5, 6),
             Token::Plus | Token::Minus => (9, 10),
             Token::Star | Token::Slash | Token::Percent => (11, 12),
             _ => (0, 0),
@@ -599,17 +633,17 @@ impl<'a> Parser<'a> {
         match tok {
             Token::Eq | Token::EqEq => Some(BinaryOp::Eq),
             Token::Ne | Token::BangEq => Some(BinaryOp::Ne),
-            Token::Lt  => Some(BinaryOp::Lt),
-            Token::Le  => Some(BinaryOp::Le),
-            Token::Gt  => Some(BinaryOp::Gt),
-            Token::Ge  => Some(BinaryOp::Ge),
-            Token::Plus    => Some(BinaryOp::Add),
-            Token::Minus   => Some(BinaryOp::Sub),
-            Token::Star    => Some(BinaryOp::Mul),
-            Token::Slash   => Some(BinaryOp::Div),
+            Token::Lt => Some(BinaryOp::Lt),
+            Token::Le => Some(BinaryOp::Le),
+            Token::Gt => Some(BinaryOp::Gt),
+            Token::Ge => Some(BinaryOp::Ge),
+            Token::Plus => Some(BinaryOp::Add),
+            Token::Minus => Some(BinaryOp::Sub),
+            Token::Star => Some(BinaryOp::Mul),
+            Token::Slash => Some(BinaryOp::Div),
             Token::Percent => Some(BinaryOp::Mod),
-            Token::And     => Some(BinaryOp::And),
-            Token::Or      => Some(BinaryOp::Or),
+            Token::And => Some(BinaryOp::And),
+            Token::Or => Some(BinaryOp::Or),
             _ => None,
         }
     }

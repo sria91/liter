@@ -6,7 +6,7 @@
 use liter::{Connection as RConn, Value};
 
 /// Run a SQL statement against both implementations and assert equal results.
-/// 
+///
 /// `setup_sql` can be multiple statements executed one by one to set up tables/data.
 /// `sql` is the final query whose results are diffed.
 ///
@@ -21,7 +21,9 @@ pub fn diff_exec(setup_sql: &[&str], sql: &str) {
 
     for setup in setup_sql {
         c_conn.execute(setup, []).expect("C setup failed");
-        r_conn.execute(setup, [] as [(); 0]).expect("Rust setup failed");
+        r_conn
+            .execute(setup, [] as [(); 0])
+            .expect("Rust setup failed");
     }
 
     // Execute against C SQLite.
@@ -32,15 +34,13 @@ pub fn diff_exec(setup_sql: &[&str], sql: &str) {
         let mut rows_iter = stmt.query([]).expect("C query failed");
         while let Some(row) = rows_iter.next().expect("C row error") {
             let cells: Vec<String> = (0..col_count)
-                .map(|i| {
-                    match row.get::<_, rusqlite::types::Value>(i) {
-                        Ok(rusqlite::types::Value::Null) => "Null".into(),
-                        Ok(rusqlite::types::Value::Integer(v)) => format!("Int({v})"),
-                        Ok(rusqlite::types::Value::Real(v)) => format!("Real({v})"),
-                        Ok(rusqlite::types::Value::Text(v)) => format!("Text({:?})", v),
-                        Ok(rusqlite::types::Value::Blob(v)) => format!("Blob({:?})", v),
-                        Err(_) => "ERROR".into(),
-                    }
+                .map(|i| match row.get::<_, rusqlite::types::Value>(i) {
+                    Ok(rusqlite::types::Value::Null) => "Null".into(),
+                    Ok(rusqlite::types::Value::Integer(v)) => format!("Int({v})"),
+                    Ok(rusqlite::types::Value::Real(v)) => format!("Real({v})"),
+                    Ok(rusqlite::types::Value::Text(v)) => format!("Text({:?})", v),
+                    Ok(rusqlite::types::Value::Blob(v)) => format!("Blob({:?})", v),
+                    Err(_) => "ERROR".into(),
                 })
                 .collect();
             c_rows.push(cells);
@@ -51,7 +51,7 @@ pub fn diff_exec(setup_sql: &[&str], sql: &str) {
         Ok(rows) => rows,
         Err(e) => panic!("Rust sqlite error for SQL:\n{sql}\nError: {e}"),
     };
-    
+
     let r_rows: Vec<Vec<String>> = r_rows_raw
         .into_iter()
         .map(|row| {
@@ -94,7 +94,7 @@ mod tests {
         diff_exec(&[], "SELECT 1 WHERE 1 = 0;");
         diff_exec(&[], "SELECT 'yes' WHERE 5 > 3 AND 2 < 4;");
     }
-    
+
     #[test]
     fn test_diff_create_insert_select() {
         diff_exec(
@@ -103,10 +103,10 @@ mod tests {
                 "INSERT INTO t VALUES (1, 'hello');",
                 "INSERT INTO t VALUES (2, 'world');",
             ],
-            "SELECT * FROM t;"
+            "SELECT * FROM t;",
         );
     }
-    
+
     #[test]
     fn test_diff_group_by() {
         diff_exec(
@@ -116,10 +116,10 @@ mod tests {
                 "INSERT INTO t VALUES (1, 20);",
                 "INSERT INTO t VALUES (2, 50);",
             ],
-            "SELECT a, SUM(b) FROM t GROUP BY a;"
+            "SELECT a, SUM(b) FROM t GROUP BY a;",
         );
     }
-    
+
     #[test]
     fn test_format_compatibility() {
         let db_path = "test_format_compat.db";
@@ -129,17 +129,28 @@ mod tests {
         // 1. Create a DB file using C SQLite
         {
             let c_conn = rusqlite::Connection::open(db_path).expect("C open failed");
-            c_conn.execute("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT, score REAL)", []).unwrap();
-            c_conn.execute("INSERT INTO users VALUES (1, 'Alice', 95.5)", []).unwrap();
-            c_conn.execute("INSERT INTO users VALUES (2, 'Bob', 80.0)", []).unwrap();
+            c_conn
+                .execute(
+                    "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT, score REAL)",
+                    [],
+                )
+                .unwrap();
+            c_conn
+                .execute("INSERT INTO users VALUES (1, 'Alice', 95.5)", [])
+                .unwrap();
+            c_conn
+                .execute("INSERT INTO users VALUES (2, 'Bob', 80.0)", [])
+                .unwrap();
         }
 
         // 2. Open it with Rust SQLite and verify we can read it
         {
             let r_conn = RConn::open(db_path).expect("Rust open failed");
-            let rows = r_conn.query("SELECT id, name, score FROM users", [] as [(); 0]).unwrap();
+            let rows = r_conn
+                .query("SELECT id, name, score FROM users", [] as [(); 0])
+                .unwrap();
             assert_eq!(rows.len(), 2);
-            
+
             // Just some quick validation of the data we extracted
             if let Value::Text(name1) = &rows[0][1] {
                 assert_eq!(name1, b"Alice");

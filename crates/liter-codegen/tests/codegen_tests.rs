@@ -1,7 +1,7 @@
-use liter_parser::parse_stmt;
-use liter_codegen::compile;
-use liter_vdbe::StepResult;
 use liter_btree::BTree;
+use liter_codegen::compile;
+use liter_parser::parse_stmt;
+use liter_vdbe::StepResult;
 
 #[test]
 fn test_compile_arithmetic() {

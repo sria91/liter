@@ -92,20 +92,20 @@ mod tests {
         let mut session = Session::new("main");
         session.record_change(ChangeOp::Insert, "users", 1);
         session.record_change(ChangeOp::Update, "users", 2);
-        
+
         let changeset = session.changeset_create();
         assert_eq!(changeset.changes.len(), 2);
         assert_eq!(changeset.changes[0].op, ChangeOp::Insert);
-        
+
         // After create, pending changes are cleared
         let changeset2 = session.changeset_create();
         assert_eq!(changeset2.changes.len(), 0);
-        
+
         // Disable tracking
         session.disable();
         session.record_change(ChangeOp::Delete, "users", 1);
         assert_eq!(session.changeset_create().changes.len(), 0);
-        
+
         // Test apply
         assert_eq!(changeset.apply().unwrap(), 2);
     }

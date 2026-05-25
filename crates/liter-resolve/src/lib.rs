@@ -76,7 +76,10 @@ impl<'a> Resolver<'a> {
             for table_or_subquery in &from.tables {
                 match table_or_subquery {
                     TableOrSubquery::Table { name, alias, .. } => {
-                        let obj = self.schema.get(name).ok_or_else(|| ResolveError::NoSuchTable(name.clone()))?;
+                        let obj = self
+                            .schema
+                            .get(name)
+                            .ok_or_else(|| ResolveError::NoSuchTable(name.clone()))?;
                         available_tables.push((alias.clone().unwrap_or_else(|| name.clone()), obj));
                     }
                     _ => return Err(ResolveError::NotImplemented),
@@ -140,7 +143,11 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
-    fn resolve_expr(&self, expr: &mut Expr, available_tables: &[(String, liter_schema::SchemaObject)]) -> ResolveResult<()> {
+    fn resolve_expr(
+        &self,
+        expr: &mut Expr,
+        available_tables: &[(String, liter_schema::SchemaObject)],
+    ) -> ResolveResult<()> {
         match expr {
             Expr::Column { table, name, .. } => {
                 let mut matches = 0;

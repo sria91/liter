@@ -225,7 +225,8 @@ pub fn encode_record(values: &[Value]) -> RecordResult<Vec<u8>> {
                     let n = encode_varint(2, &mut tmp)?;
                     header.extend_from_slice(&tmp[..n]);
                     payload.extend_from_slice(&(i as i16).to_be_bytes());
-                } else if (-8388608..=8388607).contains(&i) { // 24-bit
+                } else if (-8388608..=8388607).contains(&i) {
+                    // 24-bit
                     let mut tmp = [0u8; 9];
                     let n = encode_varint(3, &mut tmp)?;
                     header.extend_from_slice(&tmp[..n]);
@@ -236,7 +237,8 @@ pub fn encode_record(values: &[Value]) -> RecordResult<Vec<u8>> {
                     let n = encode_varint(4, &mut tmp)?;
                     header.extend_from_slice(&tmp[..n]);
                     payload.extend_from_slice(&(i as i32).to_be_bytes());
-                } else if (-140737488355328..=140737488355327).contains(&i) { // 48-bit
+                } else if (-140737488355328..=140737488355327).contains(&i) {
+                    // 48-bit
                     let mut tmp = [0u8; 9];
                     let n = encode_varint(5, &mut tmp)?;
                     header.extend_from_slice(&tmp[..n]);
@@ -279,7 +281,7 @@ pub fn encode_record(values: &[Value]) -> RecordResult<Vec<u8>> {
     let mut header_size_varint = [0u8; 9];
     let mut hs = header.len() as u64;
     let mut n = encode_varint(hs, &mut header_size_varint)?;
-    
+
     // Varint encoding might push the size over, iterate if necessary
     while hs != (header.len() + n) as u64 {
         hs = (header.len() + n) as u64;

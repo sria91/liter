@@ -7,8 +7,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use liter_vfs::{
+    AccessFlags, DeviceCharacteristics, LockLevel, OpenFlags, SyncFlags, Vfs, VfsFile,
+};
 use parking_lot::Mutex;
-use liter_vfs::{AccessFlags, DeviceCharacteristics, LockLevel, OpenFlags, SyncFlags, Vfs, VfsFile};
 
 /// Shared backing store for a single in-memory file.
 #[derive(Debug, Default, Clone)]
@@ -122,7 +124,10 @@ impl Vfs for MemVfs {
     fn open(&self, path: &Path, _flags: OpenFlags) -> io::Result<Self::File> {
         let mut files = self.files.lock();
         let store = files.entry(path.to_path_buf()).or_default().clone();
-        Ok(MemFile { store, lock: LockLevel::None })
+        Ok(MemFile {
+            store,
+            lock: LockLevel::None,
+        })
     }
 
     fn delete(&self, path: &Path, _sync_dir: bool) -> io::Result<()> {
@@ -167,7 +172,12 @@ mod tests {
     #[test]
     fn write_and_read_back() {
         let vfs = MemVfs::new();
-        let mut f = vfs.open(Path::new(":memory:"), OpenFlags::READ_WRITE | OpenFlags::CREATE).unwrap();
+        let mut f = vfs
+            .open(
+                Path::new(":memory:"),
+                OpenFlags::READ_WRITE | OpenFlags::CREATE,
+            )
+            .unwrap();
         f.write(b"hello", 0).unwrap();
         let mut buf = [0u8; 5];
         let n = f.read(&mut buf, 0).unwrap();
@@ -178,7 +188,12 @@ mod tests {
     #[test]
     fn write_at_offset() {
         let vfs = MemVfs::new();
-        let mut f = vfs.open(Path::new(":memory:"), OpenFlags::READ_WRITE | OpenFlags::CREATE).unwrap();
+        let mut f = vfs
+            .open(
+                Path::new(":memory:"),
+                OpenFlags::READ_WRITE | OpenFlags::CREATE,
+            )
+            .unwrap();
         f.write(b"world", 5).unwrap();
         assert_eq!(f.file_size().unwrap(), 10);
         let mut buf = [0u8; 5];
@@ -189,7 +204,12 @@ mod tests {
     #[test]
     fn truncate() {
         let vfs = MemVfs::new();
-        let mut f = vfs.open(Path::new(":memory:"), OpenFlags::READ_WRITE | OpenFlags::CREATE).unwrap();
+        let mut f = vfs
+            .open(
+                Path::new(":memory:"),
+                OpenFlags::READ_WRITE | OpenFlags::CREATE,
+            )
+            .unwrap();
         f.write(b"hello world", 0).unwrap();
         f.truncate(5).unwrap();
         assert_eq!(f.file_size().unwrap(), 5);

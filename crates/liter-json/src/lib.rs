@@ -7,8 +7,8 @@
 //! Phase 3 — not yet implemented.
 
 use liter_vdbe::Mem;
-use std::sync::Arc;
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 
 /// Error from a JSON function call.
 #[derive(Debug, thiserror::Error)]
@@ -40,7 +40,9 @@ fn mem_to_json(m: &Mem) -> JsonValue {
     match m {
         Mem::Null => JsonValue::Null,
         Mem::Int(i) => JsonValue::Number((*i).into()),
-        Mem::Real(f) => JsonValue::Number(serde_json::Number::from_f64(*f).unwrap_or(serde_json::Number::from(0))),
+        Mem::Real(f) => JsonValue::Number(
+            serde_json::Number::from_f64(*f).unwrap_or(serde_json::Number::from(0)),
+        ),
         Mem::Text(t) => {
             // In a full implementation we'd check for JSON subtype.
             // For now, if it parses as JSON, we treat it as JSON (like json(x)).
@@ -73,13 +75,13 @@ pub fn func_json_extract(args: &[Mem]) -> Result<Mem, JsonError> {
     if args.len() < 2 {
         return Err(JsonError::WrongArgCount("json_extract".into()));
     }
-    
+
     let json_str = match &args[0] {
         Mem::Text(s) => s.as_ref(),
         Mem::Null => return Ok(Mem::Null),
         _ => return Ok(Mem::Null),
     };
-    
+
     let path = match &args[1] {
         Mem::Text(s) => s.as_ref(),
         _ => return Ok(Mem::Null),
@@ -89,7 +91,10 @@ pub fn func_json_extract(args: &[Mem]) -> Result<Mem, JsonError> {
     // Here we just map `$.key` to `json_obj["key"]`
     let parsed = serde_json::from_str::<JsonValue>(json_str).ok();
     if let Some(mut val) = parsed {
-        let parts = path.trim_start_matches('$').split('.').filter(|s| !s.is_empty());
+        let parts = path
+            .trim_start_matches('$')
+            .split('.')
+            .filter(|s| !s.is_empty());
         for part in parts {
             val = match val {
                 JsonValue::Object(mut map) => map.remove(part).unwrap_or(JsonValue::Null),
@@ -107,7 +112,7 @@ pub fn func_json_extract(args: &[Mem]) -> Result<Mem, JsonError> {
                 _ => JsonValue::Null,
             }
         }
-        
+
         match val {
             JsonValue::Null => Ok(Mem::Null),
             JsonValue::Bool(b) => Ok(Mem::Int(if b { 1 } else { 0 })),
@@ -138,10 +143,14 @@ pub fn func_json_object(args: &[Mem]) -> Result<Mem, JsonError> {
     for i in (0..args.len()).step_by(2) {
         let key = match &args[i] {
             Mem::Text(t) => t.to_string(),
-            Mem::Null => return Err(JsonError::WrongArgCount("json_object label cannot be null".into())),
+            Mem::Null => {
+                return Err(JsonError::WrongArgCount(
+                    "json_object label cannot be null".into(),
+                ))
+            }
             m => mem_to_string(m),
         };
-        let val = mem_to_json(&args[i+1]);
+        let val = mem_to_json(&args[i + 1]);
         map.insert(key, val);
     }
     let obj = JsonValue::Object(map);
@@ -174,8 +183,11 @@ mod tests {
     fn test_json_extract() {
         let json = Mem::Text(Arc::from("{\"a\": {\"b\": 42}, \"c\": [10, 20]}"));
         let path1 = Mem::Text(Arc::from("$.a.b"));
-        assert_eq!(func_json_extract(&[json.clone(), path1]).unwrap(), Mem::Int(42));
-        
+        assert_eq!(
+            func_json_extract(&[json.clone(), path1]).unwrap(),
+            Mem::Int(42)
+        );
+
         let path2 = Mem::Text(Arc::from("$.c.1"));
         assert_eq!(func_json_extract(&[json, path2]).unwrap(), Mem::Int(20));
     }

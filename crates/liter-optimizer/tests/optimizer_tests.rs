@@ -1,7 +1,7 @@
-use liter_parser::parse_all;
-use liter_schema::{Schema, SchemaObject, ObjectKind};
 use liter_ast::ColumnDef;
 use liter_optimizer::{Optimizer, ScanKind};
+use liter_parser::parse_all;
+use liter_schema::{ObjectKind, Schema, SchemaObject};
 
 fn make_schema() -> Schema {
     let schema = Schema::new();
@@ -12,8 +12,16 @@ fn make_schema() -> Schema {
         root_page: 2,
         sql: None,
         columns: vec![
-            ColumnDef { name: "id".to_string(), type_name: None, constraints: vec![] },
-            ColumnDef { name: "email".to_string(), type_name: None, constraints: vec![] },
+            ColumnDef {
+                name: "id".to_string(),
+                type_name: None,
+                constraints: vec![],
+            },
+            ColumnDef {
+                name: "email".to_string(),
+                type_name: None,
+                constraints: vec![],
+            },
         ],
     });
     schema.insert(SchemaObject {
@@ -34,7 +42,7 @@ fn test_optimize_full_scan() {
 
     let sql = "SELECT * FROM users;";
     let stmts = parse_all(sql).unwrap();
-    
+
     let plan = optimizer.optimize_stmt(&stmts[0]).unwrap();
     assert_eq!(plan.loops.len(), 1);
     assert_eq!(plan.loops[0].table, "users");
@@ -48,7 +56,7 @@ fn test_optimize_rowid_lookup() {
 
     let sql = "SELECT * FROM users WHERE id = 42;";
     let stmts = parse_all(sql).unwrap();
-    
+
     let plan = optimizer.optimize_stmt(&stmts[0]).unwrap();
     assert_eq!(plan.loops.len(), 1);
     assert_eq!(plan.loops[0].scan_kind, ScanKind::RowIdLookup);
@@ -62,10 +70,10 @@ fn test_optimize_index_scan() {
     // email constraint matches our dummy index logic
     let sql = "SELECT * FROM users WHERE email = 'test@example.com';";
     let stmts = parse_all(sql).unwrap();
-    
+
     let plan = optimizer.optimize_stmt(&stmts[0]).unwrap();
     assert_eq!(plan.loops.len(), 1);
-    
+
     if let ScanKind::IndexScan { index, constraints } = &plan.loops[0].scan_kind {
         assert_eq!(index, "idx_users_email");
         assert!(constraints.contains(&"email".to_string()));

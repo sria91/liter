@@ -1,7 +1,7 @@
+use liter_ast::{ColumnDef, ResultColumn, Stmt};
 use liter_parser::parse_all;
-use liter_schema::{Schema, SchemaObject, ObjectKind};
-use liter_ast::{ColumnDef, Stmt, ResultColumn};
-use liter_resolve::{Resolver, ResolveError};
+use liter_resolve::{ResolveError, Resolver};
+use liter_schema::{ObjectKind, Schema, SchemaObject};
 
 fn make_schema() -> Schema {
     let schema = Schema::new();
@@ -12,9 +12,21 @@ fn make_schema() -> Schema {
         root_page: 2,
         sql: None,
         columns: vec![
-            ColumnDef { name: "id".to_string(), type_name: None, constraints: vec![] },
-            ColumnDef { name: "name".to_string(), type_name: None, constraints: vec![] },
-            ColumnDef { name: "age".to_string(), type_name: None, constraints: vec![] },
+            ColumnDef {
+                name: "id".to_string(),
+                type_name: None,
+                constraints: vec![],
+            },
+            ColumnDef {
+                name: "name".to_string(),
+                type_name: None,
+                constraints: vec![],
+            },
+            ColumnDef {
+                name: "age".to_string(),
+                type_name: None,
+                constraints: vec![],
+            },
         ],
     });
     schema.insert(SchemaObject {
@@ -24,9 +36,21 @@ fn make_schema() -> Schema {
         root_page: 3,
         sql: None,
         columns: vec![
-            ColumnDef { name: "id".to_string(), type_name: None, constraints: vec![] },
-            ColumnDef { name: "author_id".to_string(), type_name: None, constraints: vec![] },
-            ColumnDef { name: "content".to_string(), type_name: None, constraints: vec![] },
+            ColumnDef {
+                name: "id".to_string(),
+                type_name: None,
+                constraints: vec![],
+            },
+            ColumnDef {
+                name: "author_id".to_string(),
+                type_name: None,
+                constraints: vec![],
+            },
+            ColumnDef {
+                name: "content".to_string(),
+                type_name: None,
+                constraints: vec![],
+            },
         ],
     });
     schema
@@ -39,7 +63,7 @@ fn test_resolve_success() {
 
     let sql = "SELECT id, name FROM users WHERE age > 18;";
     let mut stmts = parse_all(sql).unwrap();
-    
+
     assert!(resolver.resolve_stmt(&mut stmts[0]).is_ok());
 }
 
@@ -50,7 +74,7 @@ fn test_resolve_no_such_table() {
 
     let sql = "SELECT id FROM missing_table;";
     let mut stmts = parse_all(sql).unwrap();
-    
+
     let res = resolver.resolve_stmt(&mut stmts[0]);
     assert!(matches!(res, Err(ResolveError::NoSuchTable(t)) if t == "missing_table"));
 }
@@ -62,7 +86,7 @@ fn test_resolve_no_such_column() {
 
     let sql = "SELECT bogus FROM users;";
     let mut stmts = parse_all(sql).unwrap();
-    
+
     let res = resolver.resolve_stmt(&mut stmts[0]);
     assert!(matches!(res, Err(ResolveError::NoSuchColumn(c)) if c == "bogus"));
 }
@@ -75,7 +99,7 @@ fn test_resolve_ambiguous_column() {
     // Both users and posts have an 'id' column
     let sql = "SELECT id FROM users, posts;";
     let mut stmts = parse_all(sql).unwrap();
-    
+
     let res = resolver.resolve_stmt(&mut stmts[0]);
     assert!(matches!(res, Err(ResolveError::AmbiguousColumn(c)) if c == "id"));
 }
@@ -87,23 +111,31 @@ fn test_resolve_star_expansion() {
 
     let sql = "SELECT * FROM users;";
     let mut stmts = parse_all(sql).unwrap();
-    
+
     assert!(resolver.resolve_stmt(&mut stmts[0]).is_ok());
 
     if let Stmt::Select(select) = &stmts[0] {
         if let liter_ast::SelectBody::Simple(simple) = &select.body {
             assert_eq!(simple.result_columns.len(), 3);
-            
+
             // Check that they expanded correctly
-            let names: Vec<String> = simple.result_columns.iter().filter_map(|c| {
-                if let ResultColumn::Expr { expr: liter_ast::Expr::Column { name, table, .. }, .. } = c {
-                    assert_eq!(table.as_deref(), Some("users"));
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            }).collect();
-            
+            let names: Vec<String> = simple
+                .result_columns
+                .iter()
+                .filter_map(|c| {
+                    if let ResultColumn::Expr {
+                        expr: liter_ast::Expr::Column { name, table, .. },
+                        ..
+                    } = c
+                    {
+                        assert_eq!(table.as_deref(), Some("users"));
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
             assert_eq!(names, vec!["id", "name", "age"]);
         } else {
             panic!("Expected simple select");

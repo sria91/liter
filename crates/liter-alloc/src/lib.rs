@@ -212,15 +212,17 @@ impl<A> CountingAlloc<A> {
             oom_inject_at: std::sync::atomic::AtomicUsize::new(usize::MAX),
         }
     }
-    
+
     pub fn reset(&self) {
         self.count.store(0, std::sync::atomic::Ordering::SeqCst);
         self.bytes.store(0, std::sync::atomic::Ordering::SeqCst);
-        self.oom_inject_at.store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+        self.oom_inject_at
+            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
     }
-    
+
     pub fn set_oom_inject(&self, at: usize) {
-        self.oom_inject_at.store(at, std::sync::atomic::Ordering::SeqCst);
+        self.oom_inject_at
+            .store(at, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -232,7 +234,8 @@ unsafe impl<A: SqliteAlloc> SqliteAlloc for CountingAlloc<A> {
         }
         let ptr = self.inner.malloc(n);
         if !ptr.is_null() {
-            self.bytes.fetch_add(self.inner.size(ptr), std::sync::atomic::Ordering::SeqCst);
+            self.bytes
+                .fetch_add(self.inner.size(ptr), std::sync::atomic::Ordering::SeqCst);
         }
         ptr
     }
@@ -240,7 +243,8 @@ unsafe impl<A: SqliteAlloc> SqliteAlloc for CountingAlloc<A> {
     fn free(&self, ptr: *mut u8) {
         if !ptr.is_null() {
             let size = self.inner.size(ptr);
-            self.bytes.fetch_sub(size, std::sync::atomic::Ordering::SeqCst);
+            self.bytes
+                .fetch_sub(size, std::sync::atomic::Ordering::SeqCst);
             self.inner.free(ptr);
         }
     }
@@ -257,13 +261,15 @@ unsafe impl<A: SqliteAlloc> SqliteAlloc for CountingAlloc<A> {
         if current >= self.oom_inject_at.load(std::sync::atomic::Ordering::SeqCst) {
             return core::ptr::null_mut();
         }
-        
+
         let old_size = self.inner.size(ptr);
         let new_ptr = self.inner.realloc(ptr, n);
         if !new_ptr.is_null() {
             let new_size = self.inner.size(new_ptr);
-            self.bytes.fetch_add(new_size, std::sync::atomic::Ordering::SeqCst);
-            self.bytes.fetch_sub(old_size, std::sync::atomic::Ordering::SeqCst);
+            self.bytes
+                .fetch_add(new_size, std::sync::atomic::Ordering::SeqCst);
+            self.bytes
+                .fetch_sub(old_size, std::sync::atomic::Ordering::SeqCst);
         }
         new_ptr
     }
@@ -347,15 +353,15 @@ mod tests {
     fn counting_alloc_oom_inject() {
         let alloc = CountingAlloc::new(SystemAlloc);
         alloc.set_oom_inject(1); // 0th succeeds, 1st fails
-        
+
         let p1 = alloc.malloc(16);
         assert!(!p1.is_null());
         assert_eq!(alloc.count.load(std::sync::atomic::Ordering::SeqCst), 1);
-        
+
         let p2 = alloc.malloc(16);
         assert!(p2.is_null());
         assert_eq!(alloc.count.load(std::sync::atomic::Ordering::SeqCst), 2);
-        
+
         alloc.free(p1);
     }
 }

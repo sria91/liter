@@ -48,9 +48,7 @@ pub fn encode_utf16le(c: char, buf: &mut [u8]) -> Result<usize, UnicodeError> {
 
 /// Convert a UTF-8 string to UTF-16 LE bytes.
 pub fn utf8_to_utf16le(s: &str) -> Vec<u8> {
-    s.encode_utf16()
-        .flat_map(|u| u.to_le_bytes())
-        .collect()
+    s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
 }
 
 /// Convert UTF-16 LE bytes to a Rust `String`.

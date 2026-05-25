@@ -65,52 +65,84 @@ const PAGE_TYPE_INDEX_LEAF: u8 = 0x0A;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BTreeError {
-    #[error("pager error: {0}")]  Pager(#[from] liter_pager::PagerError),
-    #[error("database is corrupt")] Corrupt,
-    #[error("cursor is not valid")] InvalidCursor,
-    #[error("key not found")]     NotFound,
-    #[error("duplicate key")]     DuplicateKey,
-    #[error("record error: {0}")] Record(String),
+    #[error("pager error: {0}")]
+    Pager(#[from] liter_pager::PagerError),
+    #[error("database is corrupt")]
+    Corrupt,
+    #[error("cursor is not valid")]
+    InvalidCursor,
+    #[error("key not found")]
+    NotFound,
+    #[error("duplicate key")]
+    DuplicateKey,
+    #[error("record error: {0}")]
+    Record(String),
     /// Internal sentinel: page has no room for a new cell.
-    #[error("page full")]         PageFull,
+    #[error("page full")]
+    PageFull,
 }
 
 pub type BTreeResult<T> = Result<T, BTreeError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeekBias { Ge, Gt }
+pub enum SeekBias {
+    Ge,
+    Gt,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeekResult { Equal, Less, Greater, Empty }
+pub enum SeekResult {
+    Equal,
+    Less,
+    Greater,
+    Empty,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CursorState { Invalid, Valid, Fault }
+pub enum CursorState {
+    Invalid,
+    Valid,
+    Fault,
+}
 
 // ── PageKind ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageKind {
-    TableInterior, TableLeaf, IndexInterior, IndexLeaf,
+    TableInterior,
+    TableLeaf,
+    IndexInterior,
+    IndexLeaf,
 }
 
 impl PageKind {
     fn from_byte(b: u8) -> BTreeResult<Self> {
         match b {
             PAGE_TYPE_TABLE_INTERIOR => Ok(Self::TableInterior),
-            PAGE_TYPE_TABLE_LEAF    => Ok(Self::TableLeaf),
+            PAGE_TYPE_TABLE_LEAF => Ok(Self::TableLeaf),
             PAGE_TYPE_INDEX_INTERIOR => Ok(Self::IndexInterior),
-            PAGE_TYPE_INDEX_LEAF    => Ok(Self::IndexLeaf),
+            PAGE_TYPE_INDEX_LEAF => Ok(Self::IndexLeaf),
             _ => Err(BTreeError::Corrupt),
         }
     }
-    pub fn is_leaf(self) -> bool { matches!(self, Self::TableLeaf | Self::IndexLeaf) }
-    pub fn is_table(self) -> bool { matches!(self, Self::TableLeaf | Self::TableInterior) }
-    fn header_size(self) -> usize { if self.is_leaf() { 8 } else { 12 } }
+    pub fn is_leaf(self) -> bool {
+        matches!(self, Self::TableLeaf | Self::IndexLeaf)
+    }
+    pub fn is_table(self) -> bool {
+        matches!(self, Self::TableLeaf | Self::TableInterior)
+    }
+    fn header_size(self) -> usize {
+        if self.is_leaf() {
+            8
+        } else {
+            12
+        }
+    }
     fn type_byte(self) -> u8 {
         match self {
-            Self::TableLeaf     => PAGE_TYPE_TABLE_LEAF,
+            Self::TableLeaf => PAGE_TYPE_TABLE_LEAF,
             Self::TableInterior => PAGE_TYPE_TABLE_INTERIOR,
-            Self::IndexLeaf     => PAGE_TYPE_INDEX_LEAF,
+            Self::IndexLeaf => PAGE_TYPE_INDEX_LEAF,
             Self::IndexInterior => PAGE_TYPE_INDEX_INTERIOR,
         }
     }
@@ -135,7 +167,9 @@ struct PageHeader {
 impl PageHeader {
     fn parse(data: &[u8], pgno: PageNumber) -> BTreeResult<Self> {
         let ho = if pgno == 1 { DB_HEADER_SIZE } else { 0 };
-        if data.len() < ho + 12 { return Err(BTreeError::Corrupt); }
+        if data.len() < ho + 12 {
+            return Err(BTreeError::Corrupt);
+        }
         let d = &data[ho..];
         let kind = PageKind::from_byte(d[0])?;
         let cell_count = u16::from_be_bytes([d[3], d[4]]);
@@ -146,14 +180,22 @@ impl PageHeader {
         } else {
             u32::from_be_bytes([d[8], d[9], d[10], d[11]])
         };
-        Ok(Self { kind, cell_count, cell_content_start, rightmost_child, header_offset: ho })
+        Ok(Self {
+            kind,
+            cell_count,
+            cell_content_start,
+            rightmost_child,
+            header_offset: ho,
+        })
     }
     fn cell_ptr_offset(&self, i: u16) -> usize {
         self.header_offset + self.kind.header_size() + i as usize * 2
     }
     fn cell_ptr(&self, data: &[u8], i: u16) -> BTreeResult<usize> {
         let off = self.cell_ptr_offset(i);
-        if off + 2 > data.len() { return Err(BTreeError::Corrupt); }
+        if off + 2 > data.len() {
+            return Err(BTreeError::Corrupt);
+        }
         Ok(u16::from_be_bytes([data[off], data[off + 1]]) as usize)
     }
 }
@@ -191,7 +233,9 @@ fn local_payload_size(payload_len: usize, page_size: u16) -> (usize, bool) {
 // ── Varint helpers ────────────────────────────────────────────────────────────
 
 fn get_varint(data: &[u8], offset: usize) -> BTreeResult<(u64, usize)> {
-    if offset >= data.len() { return Err(BTreeError::Corrupt); }
+    if offset >= data.len() {
+        return Err(BTreeError::Corrupt);
+    }
     decode_varint(&data[offset..]).map_err(|_| BTreeError::Corrupt)
 }
 
@@ -213,7 +257,11 @@ pub struct BTree {
 impl BTree {
     pub fn open(path: &Path, read_only: bool) -> BTreeResult<Self> {
         let pager = Pager::open(path, DEFAULT_PAGE_SIZE, read_only)?;
-        Ok(Self { pager: Arc::new(Mutex::new(pager)), _tempfile: None, meta: [0u32; 16] })
+        Ok(Self {
+            pager: Arc::new(Mutex::new(pager)),
+            _tempfile: None,
+            meta: [0u32; 16],
+        })
     }
 
     pub fn new_in_memory() -> Self {
@@ -230,14 +278,22 @@ impl BTree {
         }
     }
 
-    pub fn pager(&self) -> Arc<Mutex<Pager>> { Arc::clone(&self.pager) }
-    pub fn meta(&self) -> &[u32; 16] { &self.meta }
+    pub fn pager(&self) -> Arc<Mutex<Pager>> {
+        Arc::clone(&self.pager)
+    }
+    pub fn meta(&self) -> &[u32; 16] {
+        &self.meta
+    }
 
     pub fn begin_write(&self) -> BTreeResult<()> {
         Ok(self.pager.lock().unwrap().begin_write()?)
     }
-    pub fn commit(&self) -> BTreeResult<()> { Ok(self.pager.lock().unwrap().commit()?) }
-    pub fn rollback(&self) -> BTreeResult<()> { Ok(self.pager.lock().unwrap().rollback()?) }
+    pub fn commit(&self) -> BTreeResult<()> {
+        Ok(self.pager.lock().unwrap().commit()?)
+    }
+    pub fn rollback(&self) -> BTreeResult<()> {
+        Ok(self.pager.lock().unwrap().rollback()?)
+    }
 
     /// Allocate and initialize a fresh B-tree page. Returns its page number.
     pub fn allocate_page(&self, kind: PageKind) -> BTreeResult<PageNumber> {
@@ -269,16 +325,21 @@ fn init_page_at(data: &mut Vec<u8>, kind: PageKind, page_size: u16, ho: usize) {
     let ps = page_size as usize;
     data.resize(ps, 0);
     data[ho] = kind.type_byte();
-    data[ho + 3] = 0; data[ho + 4] = 0;  // cell count = 0
+    data[ho + 3] = 0;
+    data[ho + 4] = 0; // cell count = 0
     let ccs = page_size.to_be_bytes();
-    data[ho + 5] = ccs[0]; data[ho + 6] = ccs[1]; // cell content area starts at page end
+    data[ho + 5] = ccs[0];
+    data[ho + 6] = ccs[1]; // cell content area starts at page end
     data[ho + 7] = 0; // fragmented free bytes
 }
 
 // ── Cursor frame ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct CursorFrame { pgno: PageNumber, cell_idx: u16 }
+struct CursorFrame {
+    pgno: PageNumber,
+    cell_idx: u16,
+}
 
 // ── BTreeCursor ───────────────────────────────────────────────────────────────
 
@@ -307,40 +368,56 @@ impl BTreeCursor<'_> {
     pub fn move_to(&mut self, key: &[u8], _bias: SeekBias) -> BTreeResult<SeekResult> {
         self.stack.clear();
         self.state = CursorState::Invalid;
-        if key.len() != 8 { return Err(BTreeError::Corrupt); }
+        if key.len() != 8 {
+            return Err(BTreeError::Corrupt);
+        }
         let rowid = u64::from_be_bytes(key.try_into().unwrap());
         self.search(self.root_page, rowid)
     }
 
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> BTreeResult<bool> {
-        if self.state != CursorState::Valid { return Ok(false); }
+        if self.state != CursorState::Valid {
+            return Ok(false);
+        }
         self.step_next()
     }
 
     pub fn previous(&mut self) -> BTreeResult<bool> {
-        if self.state != CursorState::Valid { return Ok(false); }
+        if self.state != CursorState::Valid {
+            return Ok(false);
+        }
         self.step_prev()
     }
 
     pub fn key(&self) -> BTreeResult<&[u8]> {
-        if self.state != CursorState::Valid { return Err(BTreeError::InvalidCursor); }
+        if self.state != CursorState::Valid {
+            return Err(BTreeError::InvalidCursor);
+        }
         Ok(&self.current_key)
     }
 
     pub fn data(&self) -> BTreeResult<&[u8]> {
-        if self.state != CursorState::Valid { return Err(BTreeError::InvalidCursor); }
+        if self.state != CursorState::Valid {
+            return Err(BTreeError::InvalidCursor);
+        }
         Ok(&self.current_data)
     }
 
-    pub fn is_valid(&self) -> bool { self.state == CursorState::Valid }
-    pub fn root_page(&self) -> PageNumber { self.root_page }
+    pub fn is_valid(&self) -> bool {
+        self.state == CursorState::Valid
+    }
+    pub fn root_page(&self) -> PageNumber {
+        self.root_page
+    }
 
     /// Return the integer rowid of the current position.
     /// The key is stored as an 8-byte big-endian `u64`; reinterpret as `i64`.
     pub fn rowid(&self) -> BTreeResult<i64> {
         let k = self.key()?;
-        if k.len() != 8 { return Err(BTreeError::Corrupt); }
+        if k.len() != 8 {
+            return Err(BTreeError::Corrupt);
+        }
         let raw = u64::from_be_bytes(k.try_into().unwrap());
         Ok(raw as i64)
     }
@@ -362,7 +439,9 @@ impl BTreeCursor<'_> {
     /// Handles overflow pages (payload too large for inline storage) and page
     /// splitting (page is full after cell construction).
     pub fn insert(&mut self, key: &[u8], data: &[u8], _append: bool) -> BTreeResult<()> {
-        if key.len() != 8 { return Err(BTreeError::Corrupt); }
+        if key.len() != 8 {
+            return Err(BTreeError::Corrupt);
+        }
         let rowid = u64::from_be_bytes(key.try_into().unwrap());
         let page_size = self.btree.pager.lock().unwrap().page_size();
 
@@ -402,7 +481,11 @@ impl BTreeCursor<'_> {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let r = cell_rowid(&pd, &hdr, mid)?;
-            if rowid <= r { hi = mid; } else { lo = mid + 1; }
+            if rowid <= r {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
         }
         let child = if lo < hdr.cell_count {
             left_child(&pd, &hdr, lo)?
@@ -419,7 +502,9 @@ impl BTreeCursor<'_> {
     /// with `current_key`/`current_data` refreshed so that subsequent
     /// `Column` reads see the correct data.
     pub fn delete(&mut self) -> BTreeResult<()> {
-        if self.state != CursorState::Valid { return Err(BTreeError::InvalidCursor); }
+        if self.state != CursorState::Valid {
+            return Err(BTreeError::InvalidCursor);
+        }
         let frame = self.stack.last_mut().ok_or(BTreeError::InvalidCursor)?;
         let pgno = frame.pgno;
         let idx = frame.cell_idx;
@@ -429,7 +514,9 @@ impl BTreeCursor<'_> {
             let mut pg = self.btree.pager.lock().unwrap();
             let data = pg.write_access(pgno)?;
             let hdr = PageHeader::parse(data, pgno)?;
-            if idx >= hdr.cell_count { return Err(BTreeError::Corrupt); }
+            if idx >= hdr.cell_count {
+                return Err(BTreeError::Corrupt);
+            }
 
             let ho = hdr.header_offset;
             let hs = hdr.kind.header_size();
@@ -439,7 +526,8 @@ impl BTreeCursor<'_> {
 
             let new_count = hdr.cell_count - 1;
             let ncc = new_count.to_be_bytes();
-            data[ho + 3] = ncc[0]; data[ho + 4] = ncc[1];
+            data[ho + 3] = ncc[0];
+            data[ho + 4] = ncc[1];
             new_count
         };
 
@@ -460,17 +548,11 @@ impl BTreeCursor<'_> {
         Ok(())
     }
 
-
     // ── Cell building ─────────────────────────────────────────────────────────
 
     /// Build the on-page bytes for a table-leaf cell, allocating overflow pages
     /// if the payload exceeds `max_local`.
-    fn build_leaf_cell(
-        &self,
-        rowid: u64,
-        payload: &[u8],
-        page_size: u16,
-    ) -> BTreeResult<Vec<u8>> {
+    fn build_leaf_cell(&self, rowid: u64, payload: &[u8], page_size: u16) -> BTreeResult<Vec<u8>> {
         let (local_len, has_overflow) = local_payload_size(payload.len(), page_size);
 
         let mut cell = Vec::new();
@@ -480,11 +562,8 @@ impl BTreeCursor<'_> {
 
         if has_overflow {
             // Allocate overflow chain and store the first page number.
-            let first_ovfl = write_overflow_chain(
-                &self.btree.pager,
-                &payload[local_len..],
-                page_size,
-            )?;
+            let first_ovfl =
+                write_overflow_chain(&self.btree.pager, &payload[local_len..], page_size)?;
             cell.extend_from_slice(&first_ovfl.to_be_bytes());
         }
 
@@ -527,13 +606,17 @@ impl BTreeCursor<'_> {
         let mut cells: Vec<(u64, Vec<u8>)> = Vec::new();
         for i in 0..hdr.cell_count {
             let off = hdr.cell_ptr(&raw, i)?;
-            if off >= raw.len() { return Err(BTreeError::Corrupt); }
+            if off >= raw.len() {
+                return Err(BTreeError::Corrupt);
+            }
             let cell_slice = &raw[off..];
             let (plen, n1) = get_varint(cell_slice, 0)?;
             let (_rid, n2) = get_varint(cell_slice, n1)?;
             let (local_len, has_overflow) = local_payload_size(plen as usize, page_size);
             let cell_len = n1 + n2 + local_len + if has_overflow { 4 } else { 0 };
-            if cell_len > cell_slice.len() { return Err(BTreeError::Corrupt); }
+            if cell_len > cell_slice.len() {
+                return Err(BTreeError::Corrupt);
+            }
             let rid = get_varint(cell_slice, n1)?.0;
             cells.push((rid, cell_slice[..cell_len].to_vec()));
         }
@@ -582,7 +665,13 @@ impl BTreeCursor<'_> {
             // Write cells to left and right children.
             // Left gets cells[0..=mid], right gets cells[mid+1..].
             write_cells_to_page(&self.btree.pager, left_pgno, &cells[..=mid], kind, false)?;
-            write_cells_to_page(&self.btree.pager, right_pgno, &cells[mid+1..], kind, false)?;
+            write_cells_to_page(
+                &self.btree.pager,
+                right_pgno,
+                &cells[mid + 1..],
+                kind,
+                false,
+            )?;
 
             // Reinitialize the root as an interior page.
             {
@@ -603,20 +692,35 @@ impl BTreeCursor<'_> {
                 insert_cell_raw(data, leaf_pgno, &div_cell, ps, ho)?;
 
                 // rightmost child = right_pgno
-                data[ho + 8]  = ((right_pgno >> 24) & 0xFF) as u8;
-                data[ho + 9]  = ((right_pgno >> 16) & 0xFF) as u8;
-                data[ho + 10] = ((right_pgno >>  8) & 0xFF) as u8;
-                data[ho + 11] = ( right_pgno        & 0xFF) as u8;
+                data[ho + 8] = ((right_pgno >> 24) & 0xFF) as u8;
+                data[ho + 9] = ((right_pgno >> 16) & 0xFF) as u8;
+                data[ho + 10] = ((right_pgno >> 8) & 0xFF) as u8;
+                data[ho + 11] = (right_pgno & 0xFF) as u8;
             }
         } else {
             // ── Non-root split: redistribute and promote into parent ────────
             // Rewrite the left page (= leaf_pgno) with cells[0..=mid].
-            write_cells_to_page(&self.btree.pager, leaf_pgno, &cells[..=mid], kind, leaf_pgno == 1)?;
+            write_cells_to_page(
+                &self.btree.pager,
+                leaf_pgno,
+                &cells[..=mid],
+                kind,
+                leaf_pgno == 1,
+            )?;
             // Write cells[mid+1..] to the new sibling.
-            write_cells_to_page(&self.btree.pager, right_pgno, &cells[mid+1..], kind, false)?;
+            write_cells_to_page(
+                &self.btree.pager,
+                right_pgno,
+                &cells[mid + 1..],
+                kind,
+                false,
+            )?;
 
             // Find the parent page from the cursor stack.
-            let parent_pgno = self.stack.iter().rev()
+            let parent_pgno = self
+                .stack
+                .iter()
+                .rev()
                 .find(|f| f.pgno != leaf_pgno)
                 .map(|f| f.pgno)
                 .ok_or(BTreeError::Corrupt)?;
@@ -646,10 +750,10 @@ impl BTreeCursor<'_> {
                     let last_idx = phdr.cell_count.saturating_sub(1);
                     let last_r = cell_rowid(data, &phdr, last_idx)?;
                     if last_r == divider_rowid {
-                        data[pho + 8]  = ((right_pgno >> 24) & 0xFF) as u8;
-                        data[pho + 9]  = ((right_pgno >> 16) & 0xFF) as u8;
-                        data[pho + 10] = ((right_pgno >>  8) & 0xFF) as u8;
-                        data[pho + 11] = ( right_pgno        & 0xFF) as u8;
+                        data[pho + 8] = ((right_pgno >> 24) & 0xFF) as u8;
+                        data[pho + 9] = ((right_pgno >> 16) & 0xFF) as u8;
+                        data[pho + 10] = ((right_pgno >> 8) & 0xFF) as u8;
+                        data[pho + 11] = (right_pgno & 0xFF) as u8;
                     }
                 }
                 Err(BTreeError::PageFull) => {
@@ -671,7 +775,6 @@ impl BTreeCursor<'_> {
         Ok(())
     }
 
-
     // ── Private ───────────────────────────────────────────────────────────────
 
     fn page(&self, pgno: PageNumber) -> BTreeResult<Vec<u8>> {
@@ -683,8 +786,11 @@ impl BTreeCursor<'_> {
         let pd = self.page(pgno)?;
         let hdr = PageHeader::parse(&pd, pgno)?;
         if hdr.cell_count == 0 {
-            return if hdr.kind.is_leaf() { Ok(false) }
-                   else { self.descend_first(hdr.rightmost_child) };
+            return if hdr.kind.is_leaf() {
+                Ok(false)
+            } else {
+                self.descend_first(hdr.rightmost_child)
+            };
         }
         self.stack.push(CursorFrame { pgno, cell_idx: 0 });
         if hdr.kind.is_leaf() {
@@ -701,11 +807,17 @@ impl BTreeCursor<'_> {
         let pd = self.page(pgno)?;
         let hdr = PageHeader::parse(&pd, pgno)?;
         if hdr.cell_count == 0 {
-            return if hdr.kind.is_leaf() { Ok(false) }
-                   else { self.descend_last(hdr.rightmost_child) };
+            return if hdr.kind.is_leaf() {
+                Ok(false)
+            } else {
+                self.descend_last(hdr.rightmost_child)
+            };
         }
         let last = hdr.cell_count - 1;
-        self.stack.push(CursorFrame { pgno, cell_idx: last });
+        self.stack.push(CursorFrame {
+            pgno,
+            cell_idx: last,
+        });
         if hdr.kind.is_leaf() {
             self.load_cell(&pd, &hdr, last)?;
             self.state = CursorState::Valid;
@@ -727,7 +839,11 @@ impl BTreeCursor<'_> {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let r = cell_rowid(&pd, &hdr, mid)?;
-            if rowid <= r { hi = mid; } else { lo = mid + 1; }
+            if rowid <= r {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
         }
         if hdr.kind.is_leaf() {
             if lo < hdr.cell_count {
@@ -735,7 +851,11 @@ impl BTreeCursor<'_> {
                 self.stack.push(CursorFrame { pgno, cell_idx: lo });
                 self.load_cell(&pd, &hdr, lo)?;
                 self.state = CursorState::Valid;
-                Ok(if found == rowid { SeekResult::Equal } else { SeekResult::Greater })
+                Ok(if found == rowid {
+                    SeekResult::Equal
+                } else {
+                    SeekResult::Greater
+                })
             } else {
                 Ok(SeekResult::Less)
             }
@@ -754,7 +874,10 @@ impl BTreeCursor<'_> {
         loop {
             let (pgno, idx) = match self.stack.last() {
                 Some(f) => (f.pgno, f.cell_idx),
-                None => { self.state = CursorState::Invalid; return Ok(false); }
+                None => {
+                    self.state = CursorState::Invalid;
+                    return Ok(false);
+                }
             };
             let pd = self.page(pgno)?;
             let hdr = PageHeader::parse(&pd, pgno)?;
@@ -765,7 +888,9 @@ impl BTreeCursor<'_> {
                     self.load_cell(&pd, &hdr, next)?;
                     self.state = CursorState::Valid;
                     return Ok(true);
-                } else { self.stack.pop(); }
+                } else {
+                    self.stack.pop();
+                }
             } else {
                 let child = if next < hdr.cell_count {
                     self.stack.last_mut().unwrap().cell_idx = next;
@@ -774,7 +899,8 @@ impl BTreeCursor<'_> {
                     self.stack.last_mut().unwrap().cell_idx = next;
                     hdr.rightmost_child
                 } else {
-                    self.stack.pop(); continue;
+                    self.stack.pop();
+                    continue;
                 };
                 return self.descend_first(child);
             }
@@ -785,7 +911,10 @@ impl BTreeCursor<'_> {
         loop {
             let (pgno, idx) = match self.stack.last() {
                 Some(f) => (f.pgno, f.cell_idx),
-                None => { self.state = CursorState::Invalid; return Ok(false); }
+                None => {
+                    self.state = CursorState::Invalid;
+                    return Ok(false);
+                }
             };
             let pd = self.page(pgno)?;
             let hdr = PageHeader::parse(&pd, pgno)?;
@@ -796,7 +925,9 @@ impl BTreeCursor<'_> {
                     self.load_cell(&pd, &hdr, prev)?;
                     self.state = CursorState::Valid;
                     return Ok(true);
-                } else { self.stack.pop(); }
+                } else {
+                    self.stack.pop();
+                }
             } else if idx > 0 {
                 let prev = idx - 1;
                 self.stack.last_mut().unwrap().cell_idx = prev;
@@ -810,7 +941,9 @@ impl BTreeCursor<'_> {
 
     fn load_cell(&mut self, data: &[u8], hdr: &PageHeader, idx: u16) -> BTreeResult<()> {
         let off = hdr.cell_ptr(data, idx)?;
-        if off >= data.len() { return Err(BTreeError::Corrupt); }
+        if off >= data.len() {
+            return Err(BTreeError::Corrupt);
+        }
         let cell = &data[off..];
         match hdr.kind {
             PageKind::TableLeaf => {
@@ -821,7 +954,9 @@ impl BTreeCursor<'_> {
                 let ps = self.btree.pager.lock().unwrap().page_size();
                 let (local_len, has_overflow) = local_payload_size(plen as usize, ps);
                 let inline_end = s + local_len;
-                if inline_end > cell.len() { return Err(BTreeError::Corrupt); }
+                if inline_end > cell.len() {
+                    return Err(BTreeError::Corrupt);
+                }
                 self.current_key = rowid.to_be_bytes().to_vec();
 
                 if !has_overflow {
@@ -829,10 +964,11 @@ impl BTreeCursor<'_> {
                 } else {
                     // Read inline portion then follow overflow chain.
                     let mut payload = cell[s..inline_end].to_vec();
-                    if inline_end + 4 > cell.len() { return Err(BTreeError::Corrupt); }
-                    let first_ovfl = u32::from_be_bytes(
-                        cell[inline_end..inline_end + 4].try_into().unwrap()
-                    );
+                    if inline_end + 4 > cell.len() {
+                        return Err(BTreeError::Corrupt);
+                    }
+                    let first_ovfl =
+                        u32::from_be_bytes(cell[inline_end..inline_end + 4].try_into().unwrap());
                     let remaining = plen as usize - local_len;
                     let pg = &self.btree.pager;
                     read_overflow_chain(pg, first_ovfl, remaining, &mut payload)?;
@@ -842,7 +978,9 @@ impl BTreeCursor<'_> {
             PageKind::IndexLeaf => {
                 let (plen, n1) = get_varint(cell, 0)?;
                 let e = n1 + plen as usize;
-                if e > cell.len() { return Err(BTreeError::Corrupt); }
+                if e > cell.len() {
+                    return Err(BTreeError::Corrupt);
+                }
                 self.current_key = cell[n1..e].to_vec();
                 self.current_data = Vec::new();
             }
@@ -880,8 +1018,8 @@ fn write_overflow_chain(
             // Write next-page pointer.
             data[0] = ((next_pgno >> 24) & 0xFF) as u8;
             data[1] = ((next_pgno >> 16) & 0xFF) as u8;
-            data[2] = ((next_pgno >>  8) & 0xFF) as u8;
-            data[3] = ( next_pgno        & 0xFF) as u8;
+            data[2] = ((next_pgno >> 8) & 0xFF) as u8;
+            data[3] = (next_pgno & 0xFF) as u8;
             // Write data bytes.
             data[4..4 + chunk.len()].copy_from_slice(chunk);
             new_pgno
@@ -901,9 +1039,7 @@ fn read_overflow_chain(
     remaining: usize,
     out: &mut Vec<u8>,
 ) -> BTreeResult<()> {
-    let ps = {
-        pager.lock().unwrap().page_size() as usize
-    };
+    let ps = { pager.lock().unwrap().page_size() as usize };
     let capacity = ps - 4;
     let mut pgno = first_pgno;
     let mut left = remaining;
@@ -915,7 +1051,9 @@ fn read_overflow_chain(
         };
         let next = u32::from_be_bytes(page_data[0..4].try_into().unwrap());
         let take = left.min(capacity);
-        if 4 + take > page_data.len() { return Err(BTreeError::Corrupt); }
+        if 4 + take > page_data.len() {
+            return Err(BTreeError::Corrupt);
+        }
         out.extend_from_slice(&page_data[4..4 + take]);
         left -= take;
         pgno = next;
@@ -927,7 +1065,9 @@ fn read_overflow_chain(
 
 fn cell_rowid(data: &[u8], hdr: &PageHeader, idx: u16) -> BTreeResult<u64> {
     let off = hdr.cell_ptr(data, idx)?;
-    if off >= data.len() { return Err(BTreeError::Corrupt); }
+    if off >= data.len() {
+        return Err(BTreeError::Corrupt);
+    }
     let cell = &data[off..];
     match hdr.kind {
         PageKind::TableLeaf => {
@@ -936,7 +1076,9 @@ fn cell_rowid(data: &[u8], hdr: &PageHeader, idx: u16) -> BTreeResult<u64> {
             Ok(rowid)
         }
         PageKind::TableInterior => {
-            if cell.len() < 5 { return Err(BTreeError::Corrupt); }
+            if cell.len() < 5 {
+                return Err(BTreeError::Corrupt);
+            }
             let (rowid, _) = get_varint(cell, 4)?;
             Ok(rowid)
         }
@@ -946,7 +1088,9 @@ fn cell_rowid(data: &[u8], hdr: &PageHeader, idx: u16) -> BTreeResult<u64> {
 
 fn left_child(data: &[u8], hdr: &PageHeader, idx: u16) -> BTreeResult<PageNumber> {
     let off = hdr.cell_ptr(data, idx)?;
-    if off + 4 > data.len() { return Err(BTreeError::Corrupt); }
+    if off + 4 > data.len() {
+        return Err(BTreeError::Corrupt);
+    }
     Ok(u32::from_be_bytes(data[off..off + 4].try_into().unwrap()))
 }
 
@@ -965,7 +1109,9 @@ fn insert_cell_into_page(
     let hs = hdr.kind.header_size();
     let cc = hdr.cell_count;
     let mut ccs = hdr.cell_content_start as usize;
-    if ccs == 0 { ccs = 65536; }
+    if ccs == 0 {
+        ccs = 65536;
+    }
 
     let ptr_end = ho + hs + (cc as usize + 1) * 2;
     if ccs < ptr_end + cell.len() {
@@ -974,7 +1120,9 @@ fn insert_cell_into_page(
 
     let ps = data.len();
     let new_ccs = ccs - cell.len();
-    if new_ccs + cell.len() > ps { return Err(BTreeError::Corrupt); }
+    if new_ccs + cell.len() > ps {
+        return Err(BTreeError::Corrupt);
+    }
     data[new_ccs..new_ccs + cell.len()].copy_from_slice(cell);
 
     // Sorted insertion position by rowid.
@@ -986,7 +1134,10 @@ fn insert_cell_into_page(
             let c = &data[cell_off..];
             if let Ok((_, n1)) = decode_varint(c) {
                 if let Ok((r, _)) = decode_varint(&c[n1..]) {
-                    if rowid <= r { ins = i; break; }
+                    if rowid <= r {
+                        ins = i;
+                        break;
+                    }
                 }
             }
         }
@@ -996,13 +1147,15 @@ fn insert_cell_into_page(
     let shift = (cc - ins) as usize * 2;
     data.copy_within(ins_off..ins_off + shift, ins_off + 2);
     let np = new_ccs as u16;
-    data[ins_off]     = (np >> 8) as u8;
+    data[ins_off] = (np >> 8) as u8;
     data[ins_off + 1] = np as u8;
 
     let ncc = (cc + 1).to_be_bytes();
-    data[ho + 3] = ncc[0]; data[ho + 4] = ncc[1];
+    data[ho + 3] = ncc[0];
+    data[ho + 4] = ncc[1];
     let nccs = (new_ccs as u16).to_be_bytes();
-    data[ho + 5] = nccs[0]; data[ho + 6] = nccs[1];
+    data[ho + 5] = nccs[0];
+    data[ho + 6] = nccs[1];
     Ok(())
 }
 
@@ -1018,7 +1171,9 @@ fn insert_cell_raw(
     let hs = hdr.kind.header_size();
     let cc = hdr.cell_count;
     let mut ccs = hdr.cell_content_start as usize;
-    if ccs == 0 { ccs = page_size as usize; }
+    if ccs == 0 {
+        ccs = page_size as usize;
+    }
 
     let ptr_end = ho + hs + (cc as usize + 1) * 2;
     if ccs < ptr_end + cell.len() {
@@ -1031,13 +1186,15 @@ fn insert_cell_raw(
     // Append pointer at end of cell pointer array.
     let ins_off = ho + hs + cc as usize * 2;
     let np = new_ccs as u16;
-    data[ins_off]     = (np >> 8) as u8;
+    data[ins_off] = (np >> 8) as u8;
     data[ins_off + 1] = np as u8;
 
     let ncc = (cc + 1).to_be_bytes();
-    data[ho + 3] = ncc[0]; data[ho + 4] = ncc[1];
+    data[ho + 3] = ncc[0];
+    data[ho + 4] = ncc[1];
     let nccs = (new_ccs as u16).to_be_bytes();
-    data[ho + 5] = nccs[0]; data[ho + 6] = nccs[1];
+    data[ho + 5] = nccs[0];
+    data[ho + 6] = nccs[1];
     Ok(())
 }
 
@@ -1080,8 +1237,8 @@ fn insert_interior_divider(
     let mut div_cell = Vec::new();
     div_cell.extend_from_slice(&left_pgno.to_be_bytes());
     let mut tmp = [0u8; 9];
-    let vn = encode_varint(divider_rowid, &mut tmp)
-        .map_err(|e| BTreeError::Record(e.to_string()))?;
+    let vn =
+        encode_varint(divider_rowid, &mut tmp).map_err(|e| BTreeError::Record(e.to_string()))?;
     div_cell.extend_from_slice(&tmp[..vn]);
 
     let mut pg = pager.lock().unwrap();
@@ -1091,17 +1248,16 @@ fn insert_interior_divider(
     let hdr = PageHeader::parse(data, parent_pgno)?;
 
     // Check whether we need to update the rightmost child pointer.
-    let is_rightmost = divider_rowid >= cell_rowid_for_last_interior(data, &hdr)
-        .unwrap_or(0);
+    let is_rightmost = divider_rowid >= cell_rowid_for_last_interior(data, &hdr).unwrap_or(0);
 
     insert_cell_raw(data, parent_pgno, &div_cell, ps, ho)?;
 
     if is_rightmost {
         // The new right sibling becomes the rightmost child.
-        data[ho + 8]  = ((right_pgno >> 24) & 0xFF) as u8;
-        data[ho + 9]  = ((right_pgno >> 16) & 0xFF) as u8;
-        data[ho + 10] = ((right_pgno >>  8) & 0xFF) as u8;
-        data[ho + 11] = ( right_pgno        & 0xFF) as u8;
+        data[ho + 8] = ((right_pgno >> 24) & 0xFF) as u8;
+        data[ho + 9] = ((right_pgno >> 16) & 0xFF) as u8;
+        data[ho + 10] = ((right_pgno >> 8) & 0xFF) as u8;
+        data[ho + 11] = (right_pgno & 0xFF) as u8;
     }
     Ok(())
 }
@@ -1109,7 +1265,9 @@ fn insert_interior_divider(
 /// Extract the rowid of the last cell on an interior page (for comparison).
 #[allow(dead_code)]
 fn cell_rowid_for_last_interior(data: &[u8], hdr: &PageHeader) -> BTreeResult<u64> {
-    if hdr.cell_count == 0 { return Ok(0); }
+    if hdr.cell_count == 0 {
+        return Ok(0);
+    }
     cell_rowid(data, hdr, hdr.cell_count - 1)
 }
 
@@ -1142,7 +1300,8 @@ mod tests {
     fn insert_single_row() {
         let bt = new_bt();
         let mut cur = bt.cursor(1, true).unwrap();
-        cur.insert(&42u64.to_be_bytes(), b"hello world", false).unwrap();
+        cur.insert(&42u64.to_be_bytes(), b"hello world", false)
+            .unwrap();
         cur.move_to_first().unwrap();
         assert!(cur.is_valid());
         assert_eq!(cur.key().unwrap(), &42u64.to_be_bytes());
@@ -1154,7 +1313,8 @@ mod tests {
         let bt = new_bt();
         let mut cur = bt.cursor(1, true).unwrap();
         for rowid in [5u64, 1, 3, 2, 4] {
-            cur.insert(&rowid.to_be_bytes(), &rowid.to_le_bytes(), false).unwrap();
+            cur.insert(&rowid.to_be_bytes(), &rowid.to_le_bytes(), false)
+                .unwrap();
         }
         let mut found = Vec::new();
         cur.move_to_first().unwrap();
@@ -1169,28 +1329,49 @@ mod tests {
     fn reverse_traversal() {
         let bt = new_bt();
         let mut cur = bt.cursor(1, true).unwrap();
-        for rowid in 1u64..=4 { cur.insert(&rowid.to_be_bytes(), b"x", false).unwrap(); }
+        for rowid in 1u64..=4 {
+            cur.insert(&rowid.to_be_bytes(), b"x", false).unwrap();
+        }
         cur.move_to_last().unwrap();
-        assert_eq!(u64::from_be_bytes(cur.key().unwrap().try_into().unwrap()), 4);
+        assert_eq!(
+            u64::from_be_bytes(cur.key().unwrap().try_into().unwrap()),
+            4
+        );
         cur.previous().unwrap();
-        assert_eq!(u64::from_be_bytes(cur.key().unwrap().try_into().unwrap()), 3);
+        assert_eq!(
+            u64::from_be_bytes(cur.key().unwrap().try_into().unwrap()),
+            3
+        );
     }
 
     #[test]
     fn seek_exact_and_miss() {
         let bt = new_bt();
         let mut cur = bt.cursor(1, true).unwrap();
-        for rowid in [1u64, 3, 5] { cur.insert(&rowid.to_be_bytes(), b"v", false).unwrap(); }
-        assert_eq!(cur.move_to(&3u64.to_be_bytes(), SeekBias::Ge).unwrap(), SeekResult::Equal);
-        assert_eq!(cur.move_to(&2u64.to_be_bytes(), SeekBias::Ge).unwrap(), SeekResult::Greater);
+        for rowid in [1u64, 3, 5] {
+            cur.insert(&rowid.to_be_bytes(), b"v", false).unwrap();
+        }
+        assert_eq!(
+            cur.move_to(&3u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Equal
+        );
+        assert_eq!(
+            cur.move_to(&2u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Greater
+        );
     }
 
     #[test]
     fn delete_middle_row() {
         let bt = new_bt();
         let mut cur = bt.cursor(1, true).unwrap();
-        for rowid in 1u64..=3 { cur.insert(&rowid.to_be_bytes(), b"d", false).unwrap(); }
-        assert_eq!(cur.move_to(&2u64.to_be_bytes(), SeekBias::Ge).unwrap(), SeekResult::Equal);
+        for rowid in 1u64..=3 {
+            cur.insert(&rowid.to_be_bytes(), b"d", false).unwrap();
+        }
+        assert_eq!(
+            cur.move_to(&2u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Equal
+        );
         cur.delete().unwrap();
         let mut found = Vec::new();
         cur.move_to_first().unwrap();
@@ -1211,7 +1392,8 @@ mod tests {
         // 4096-byte page, max_local = 4096 - 35 = 4061.
         // A 12 KiB payload definitely overflows.
         let big_payload: Vec<u8> = (0u8..=255).cycle().take(12 * 1024).collect();
-        cur.insert(&1u64.to_be_bytes(), &big_payload, false).unwrap();
+        cur.insert(&1u64.to_be_bytes(), &big_payload, false)
+            .unwrap();
 
         cur.move_to_first().unwrap();
         assert!(cur.is_valid());
@@ -1293,7 +1475,10 @@ mod tests {
         while cur.is_valid() {
             let key = u64::from_be_bytes(cur.key().unwrap().try_into().unwrap());
             count += 1;
-            assert_eq!(key, count, "forward traversal out of order at position {count}");
+            assert_eq!(
+                key, count,
+                "forward traversal out of order at position {count}"
+            );
             cur.next().unwrap();
         }
         assert_eq!(count, 500);
@@ -1305,7 +1490,10 @@ mod tests {
         for ps in [512u16, 1024, 2048, 4096, 8192, 16384, 32768] {
             let max = max_local_table(ps);
             let min = min_local_table(ps);
-            assert!(min <= max, "min_local ({min}) > max_local ({max}) for page_size={ps}");
+            assert!(
+                min <= max,
+                "min_local ({min}) > max_local ({max}) for page_size={ps}"
+            );
             assert!(max < ps as usize, "max_local must fit in a page");
         }
     }

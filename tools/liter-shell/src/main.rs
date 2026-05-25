@@ -20,7 +20,10 @@ fn main() {
         }
     };
 
-    println!("Liter-rs v{} — targeting SQLite 3.53.x", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Liter-rs v{} — targeting SQLite 3.53.x",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("Connected to: {}", conn.path());
     println!("Enter SQL statements terminated by ';', or '.quit' to exit.");
 
@@ -33,7 +36,10 @@ fn main() {
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
-            Err(e) => { eprintln!("Input error: {e}"); break; }
+            Err(e) => {
+                eprintln!("Input error: {e}");
+                break;
+            }
         };
 
         let trimmed = line.trim();

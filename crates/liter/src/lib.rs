@@ -39,7 +39,10 @@ pub struct WasmConnection {
 
 #[cfg_attr(all(feature = "wasm", target_arch = "wasm32"), wasm_bindgen)]
 impl WasmConnection {
-    #[cfg_attr(all(feature = "wasm", target_arch = "wasm32"), wasm_bindgen(constructor))]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        wasm_bindgen(constructor)
+    )]
     pub fn new() -> Result<WasmConnection, String> {
         match Connection::open_in_memory() {
             Ok(conn) => Ok(Self { conn }),
@@ -119,7 +122,7 @@ impl Connection {
             liter_btree::BTree::open(Path::new(path), false)?
         };
         let schema = liter_schema::Schema::new();
-        
+
         // Try to load schema from sqlite_schema (root page 1)
         if let Ok(mut cursor) = btree.cursor(1, false) {
             if cursor.move_to_first().unwrap_or(false) {
@@ -131,20 +134,26 @@ impl Connection {
                                 Some(Value::Text(type_val)),
                                 Some(Value::Int(rootpage)),
                                 Some(Value::Text(sql)),
-                            ) = (
-                                record.first(),
-                                record.get(3),
-                                record.get(4),
-                            ) {
+                            ) = (record.first(), record.get(3), record.get(4))
+                            {
                                 let type_str = String::from_utf8_lossy(type_val);
-                                eprintln!("Loaded schema object: type='{}', sql={:?}", type_str, String::from_utf8_lossy(sql));
+                                eprintln!(
+                                    "Loaded schema object: type='{}', sql={:?}",
+                                    type_str,
+                                    String::from_utf8_lossy(sql)
+                                );
                                 if type_str == "table" {
                                     let sql_str = String::from_utf8_lossy(sql);
                                     match liter_parser::parse_stmt(&sql_str) {
                                         Ok(liter_ast::Stmt::Create(create_stmt)) => {
-                                            if let liter_ast::CreateStmt::Table(create_table) = *create_stmt {
+                                            if let liter_ast::CreateStmt::Table(create_table) =
+                                                *create_stmt
+                                            {
                                                 let columns = match create_table.body {
-                                                    liter_ast::CreateTableBody::Columns { columns, .. } => columns,
+                                                    liter_ast::CreateTableBody::Columns {
+                                                        columns,
+                                                        ..
+                                                    } => columns,
                                                     _ => Vec::new(),
                                                 };
                                                 schema.insert(liter_schema::SchemaObject {
@@ -217,18 +226,18 @@ impl Connection {
         vm.func_dispatcher = Some(|name, args| {
             liter_functions::dispatch_function(name, args).map_err(|e| e.to_string())
         });
-        vm.agg_dispatcher = Some(|name| {
-            liter_functions::dispatch_aggregate(name)
-        });
+        vm.agg_dispatcher = Some(|name| liter_functions::dispatch_aggregate(name));
 
         // Only auto-begin/commit when NOT inside a user transaction.
         let auto_txn = !self.in_txn.get();
         if auto_txn {
             self.btree.begin_write()?;
         }
-        
+
         let mut cursors: Vec<Option<liter_vdbe::VdbeCursor>> = Vec::with_capacity(vm.n_cursors);
-        for _ in 0..vm.n_cursors { cursors.push(None); }
+        for _ in 0..vm.n_cursors {
+            cursors.push(None);
+        }
 
         let mut root_page = None;
 
@@ -246,11 +255,15 @@ impl Connection {
         })();
 
         if let Err(e) = res {
-            if auto_txn { let _ = self.btree.rollback(); }
+            if auto_txn {
+                let _ = self.btree.rollback();
+            }
             return Err(e);
         }
 
-        if auto_txn { self.btree.commit()?; }
+        if auto_txn {
+            self.btree.commit()?;
+        }
 
         // If it was a CREATE TABLE statement, insert into the schema catalog.
         if is_create {
@@ -281,7 +294,7 @@ impl Connection {
     /// Execute a SQL query and return all result rows.
     pub fn query(&self, sql: &str, _params: impl IntoParams) -> SqliteResult<Vec<Vec<Value>>> {
         let ast = liter_parser::parse_stmt(sql)?;
-        
+
         let mut results = Vec::new();
 
         let mut vm = liter_codegen::compile_with_schema(&ast, &self.schema)?;
@@ -296,12 +309,12 @@ impl Connection {
                 liter_functions::dispatch_function(name, args).map_err(|e| e.to_string())
             }
         });
-        vm.agg_dispatcher = Some(|name| {
-            liter_functions::dispatch_aggregate(name)
-        });
+        vm.agg_dispatcher = Some(|name| liter_functions::dispatch_aggregate(name));
 
         let mut cursors: Vec<Option<liter_vdbe::VdbeCursor>> = Vec::with_capacity(vm.n_cursors);
-        for _ in 0..vm.n_cursors { cursors.push(None); }
+        for _ in 0..vm.n_cursors {
+            cursors.push(None);
+        }
 
         while let liter_vdbe::StepResult::Row = vm.step(&self.btree, &mut cursors)? {
             if let Some(row) = vm.current_result_row() {
@@ -319,8 +332,14 @@ impl Connection {
     /// Execute a SQL query expected to return a single value.
     pub fn query_one<T: FromValue>(&self, sql: &str, params: impl IntoParams) -> SqliteResult<T> {
         let rows = self.query(sql, params)?;
-        let row = rows.into_iter().next().ok_or_else(|| SqliteError::Sql("no rows returned".into()))?;
-        let val = row.into_iter().next().ok_or_else(|| SqliteError::Sql("no columns returned".into()))?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| SqliteError::Sql("no rows returned".into()))?;
+        let val = row
+            .into_iter()
+            .next()
+            .ok_or_else(|| SqliteError::Sql("no columns returned".into()))?;
         T::from_value(val)
     }
 
@@ -447,7 +466,9 @@ impl Statement<'_> {
 
     /// Return the value of column `col` (0-indexed) from the last `Row` result.
     pub fn column_value(&self, col: usize) -> SqliteResult<Value> {
-        self.column_cache.get(col).cloned()
+        self.column_cache
+            .get(col)
+            .cloned()
             .ok_or_else(|| SqliteError::Sql(format!("column index {} out of range", col)))
     }
 
@@ -520,7 +541,7 @@ mod tests {
     fn test_execute_simple_select() {
         let conn = Connection::open_in_memory().unwrap();
         let rows = conn.query("SELECT 1 + 1;", [] as [(); 0]).unwrap();
-        
+
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 1);
         assert_eq!(rows[0][0], Value::Int(2));
@@ -529,8 +550,10 @@ mod tests {
     #[test]
     fn test_execute_multiple_columns() {
         let conn = Connection::open_in_memory().unwrap();
-        let rows = conn.query("SELECT 42, 'hello', 3.14;", [] as [(); 0]).unwrap();
-        
+        let rows = conn
+            .query("SELECT 42, 'hello', 3.14;", [] as [(); 0])
+            .unwrap();
+
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 3);
         assert_eq!(rows[0][0], Value::Int(42));
@@ -541,7 +564,7 @@ mod tests {
     #[test]
     fn test_create_table_and_insert() {
         let conn = Connection::open_in_memory().unwrap();
-        
+
         // Create table
         let res = conn.execute("CREATE TABLE users (id INTEGER, name TEXT);", [] as [(); 0]);
         assert!(res.is_ok(), "CREATE TABLE failed: {:?}", res.err());
@@ -550,11 +573,11 @@ mod tests {
         let tables = conn.schema.tables();
         assert_eq!(tables.len(), 1);
         assert_eq!(tables[0].name, "users");
-        
+
         // Insert a row
         let res = conn.execute("INSERT INTO users VALUES (1, 'alice');", [] as [(); 0]);
         assert!(res.is_ok(), "INSERT failed: {:?}", res.err());
-        
+
         // Insert another row
         let res = conn.execute("INSERT INTO users VALUES (2, 'bob');", [] as [(); 0]);
         assert!(res.is_ok(), "INSERT failed: {:?}", res.err());
@@ -569,11 +592,16 @@ mod tests {
     #[test]
     fn test_select_from_table() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE users (id INTEGER, name TEXT)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO users VALUES (1, 'alice')", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO users VALUES (2, 'bob')", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE users (id INTEGER, name TEXT)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO users VALUES (1, 'alice')", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO users VALUES (2, 'bob')", [] as [(); 0])
+            .unwrap();
 
-        let rows = conn.query("SELECT id, name FROM users", [] as [(); 0]).unwrap();
+        let rows = conn
+            .query("SELECT id, name FROM users", [] as [(); 0])
+            .unwrap();
         assert_eq!(rows.len(), 2, "expected 2 rows, got {}", rows.len());
         assert_eq!(rows[0][0], Value::Int(1));
         assert_eq!(rows[0][1], Value::Text(b"alice".to_vec()));
@@ -584,8 +612,10 @@ mod tests {
     #[test]
     fn test_select_star_from_table() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE items (x INTEGER, y INTEGER)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO items VALUES (10, 20)", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE items (x INTEGER, y INTEGER)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO items VALUES (10, 20)", [] as [(); 0])
+            .unwrap();
 
         let rows = conn.query("SELECT * FROM items", [] as [(); 0]).unwrap();
         assert_eq!(rows.len(), 1);
@@ -596,13 +626,19 @@ mod tests {
     #[test]
     fn test_select_from_where() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE t (id INTEGER, val TEXT)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO t VALUES (1, 'a')", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO t VALUES (2, 'b')", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO t VALUES (3, 'c')", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER, val TEXT)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 'a')", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (2, 'b')", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (3, 'c')", [] as [(); 0])
+            .unwrap();
 
         // WHERE with equality — should return only id=2
-        let rows = conn.query("SELECT id, val FROM t WHERE id = 2", [] as [(); 0]).unwrap();
+        let rows = conn
+            .query("SELECT id, val FROM t WHERE id = 2", [] as [(); 0])
+            .unwrap();
         assert_eq!(rows.len(), 1, "expected 1 matching row, got {}", rows.len());
         assert_eq!(rows[0][0], Value::Int(2));
         assert_eq!(rows[0][1], Value::Text(b"b".to_vec()));
@@ -611,7 +647,8 @@ mod tests {
     #[test]
     fn test_select_from_empty_table() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE empty (id INTEGER)", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE empty (id INTEGER)", [] as [(); 0])
+            .unwrap();
         let rows = conn.query("SELECT id FROM empty", [] as [(); 0]).unwrap();
         assert_eq!(rows.len(), 0, "expected 0 rows from empty table");
     }
@@ -621,9 +658,12 @@ mod tests {
     #[test]
     fn test_prepare_step_column_value() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE p (x INTEGER, y TEXT)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO p VALUES (1, 'one')", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO p VALUES (2, 'two')", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE p (x INTEGER, y TEXT)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO p VALUES (1, 'one')", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO p VALUES (2, 'two')", [] as [(); 0])
+            .unwrap();
 
         let mut stmt = conn.prepare("SELECT x, y FROM p").unwrap();
 
@@ -647,8 +687,10 @@ mod tests {
     #[test]
     fn test_statement_reset() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE r (n INTEGER)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO r VALUES (42)", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE r (n INTEGER)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO r VALUES (42)", [] as [(); 0])
+            .unwrap();
 
         let mut stmt = conn.prepare("SELECT n FROM r").unwrap();
 
@@ -671,7 +713,10 @@ mod tests {
 
         assert_eq!(stmt.step().unwrap(), StepResult::Row);
         assert_eq!(stmt.column_value(0).unwrap(), Value::Int(100));
-        assert_eq!(stmt.column_value(1).unwrap(), Value::Text(b"hello".to_vec()));
+        assert_eq!(
+            stmt.column_value(1).unwrap(),
+            Value::Text(b"hello".to_vec())
+        );
         assert_eq!(stmt.step().unwrap(), StepResult::Done);
     }
 
@@ -680,10 +725,14 @@ mod tests {
     #[test]
     fn test_delete_all() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE d (x INTEGER)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO d VALUES (1)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO d VALUES (2)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO d VALUES (3)", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE d (x INTEGER)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO d VALUES (1)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO d VALUES (2)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO d VALUES (3)", [] as [(); 0])
+            .unwrap();
 
         conn.execute("DELETE FROM d", [] as [(); 0]).unwrap();
 
@@ -694,12 +743,17 @@ mod tests {
     #[test]
     fn test_delete_where() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE d2 (id INTEGER, val TEXT)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO d2 VALUES (1, 'keep')", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO d2 VALUES (2, 'drop')", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO d2 VALUES (3, 'keep')", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE d2 (id INTEGER, val TEXT)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO d2 VALUES (1, 'keep')", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO d2 VALUES (2, 'drop')", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO d2 VALUES (3, 'keep')", [] as [(); 0])
+            .unwrap();
 
-        conn.execute("DELETE FROM d2 WHERE id = 2", [] as [(); 0]).unwrap();
+        conn.execute("DELETE FROM d2 WHERE id = 2", [] as [(); 0])
+            .unwrap();
 
         let rows = conn.query("SELECT id FROM d2", [] as [(); 0]).unwrap();
         assert_eq!(rows.len(), 2, "only 1 row should be deleted");
@@ -710,11 +764,15 @@ mod tests {
     #[test]
     fn test_update_all() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE u (id INTEGER, score INTEGER)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO u VALUES (1, 10)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO u VALUES (2, 20)", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE u (id INTEGER, score INTEGER)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO u VALUES (1, 10)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO u VALUES (2, 20)", [] as [(); 0])
+            .unwrap();
 
-        conn.execute("UPDATE u SET score = 99", [] as [(); 0]).unwrap();
+        conn.execute("UPDATE u SET score = 99", [] as [(); 0])
+            .unwrap();
 
         let rows = conn.query("SELECT score FROM u", [] as [(); 0]).unwrap();
         assert_eq!(rows.len(), 2);
@@ -725,11 +783,15 @@ mod tests {
     #[test]
     fn test_update_where() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE u2 (id INTEGER, val TEXT)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO u2 VALUES (1, 'old')", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO u2 VALUES (2, 'old')", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE u2 (id INTEGER, val TEXT)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO u2 VALUES (1, 'old')", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO u2 VALUES (2, 'old')", [] as [(); 0])
+            .unwrap();
 
-        conn.execute("UPDATE u2 SET val = 'new' WHERE id = 1", [] as [(); 0]).unwrap();
+        conn.execute("UPDATE u2 SET val = 'new' WHERE id = 1", [] as [(); 0])
+            .unwrap();
 
         let rows = conn.query("SELECT id, val FROM u2", [] as [(); 0]).unwrap();
         assert_eq!(rows.len(), 2);
@@ -740,13 +802,19 @@ mod tests {
     #[test]
     fn test_where_and() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE w (a INTEGER, b INTEGER)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO w VALUES (1, 10)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO w VALUES (2, 20)", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO w VALUES (3, 30)", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE w (a INTEGER, b INTEGER)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO w VALUES (1, 10)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO w VALUES (2, 20)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO w VALUES (3, 30)", [] as [(); 0])
+            .unwrap();
 
         // a > 1 AND b < 30 should match only row (2, 20)
-        let rows = conn.query("SELECT a FROM w WHERE a > 1 AND b < 30", [] as [(); 0]).unwrap();
+        let rows = conn
+            .query("SELECT a FROM w WHERE a > 1 AND b < 30", [] as [(); 0])
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], Value::Int(2));
     }
@@ -754,10 +822,12 @@ mod tests {
     #[test]
     fn test_explicit_transaction_commit() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE tx (n INTEGER)", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE tx (n INTEGER)", [] as [(); 0])
+            .unwrap();
 
         conn.execute("BEGIN", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO tx VALUES (42)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO tx VALUES (42)", [] as [(); 0])
+            .unwrap();
         conn.execute("COMMIT", [] as [(); 0]).unwrap();
 
         let rows = conn.query("SELECT n FROM tx", [] as [(); 0]).unwrap();
@@ -768,10 +838,12 @@ mod tests {
     #[test]
     fn test_explicit_transaction_rollback() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE tx2 (n INTEGER)", [] as [(); 0]).unwrap();
+        conn.execute("CREATE TABLE tx2 (n INTEGER)", [] as [(); 0])
+            .unwrap();
 
         conn.execute("BEGIN", [] as [(); 0]).unwrap();
-        conn.execute("INSERT INTO tx2 VALUES (99)", [] as [(); 0]).unwrap();
+        conn.execute("INSERT INTO tx2 VALUES (99)", [] as [(); 0])
+            .unwrap();
         conn.execute("ROLLBACK", [] as [(); 0]).unwrap();
 
         let rows = conn.query("SELECT n FROM tx2", [] as [(); 0]).unwrap();

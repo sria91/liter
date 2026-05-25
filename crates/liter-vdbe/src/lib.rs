@@ -9,7 +9,6 @@
 use liter_btree::PageKind;
 use std::sync::Arc;
 
-
 /// Trait for aggregate function states (e.g., SUM, COUNT).
 pub trait AggregateState: std::fmt::Debug {
     fn step(&mut self, args: &[Mem]) -> Result<(), String>;
@@ -31,7 +30,9 @@ pub enum Mem {
 }
 
 impl Mem {
-    pub fn is_null(&self) -> bool { matches!(self, Mem::Null) }
+    pub fn is_null(&self) -> bool {
+        matches!(self, Mem::Null)
+    }
 
     /// True if the value is considered "true" in a boolean context
     /// (non-null, non-zero integer, non-zero real).
@@ -169,7 +170,10 @@ pub enum VdbeCursor<'a> {
 impl<'a> Default for VdbeCursor<'a> {
     fn default() -> Self {
         // Not used directly, but useful for arrays
-        VdbeCursor::Sorter(Sorter { records: vec![], pos: 0 })
+        VdbeCursor::Sorter(Sorter {
+            records: vec![],
+            pos: 0,
+        })
     }
 }
 
@@ -389,7 +393,11 @@ impl Vdbe {
         addr
     }
 
-    pub fn step<'a>(&mut self, btree: &'a liter_btree::BTree, cursors: &mut [Option<VdbeCursor<'a>>]) -> VdbeResult<StepResult> {
+    pub fn step<'a>(
+        &mut self,
+        btree: &'a liter_btree::BTree,
+        cursors: &mut [Option<VdbeCursor<'a>>],
+    ) -> VdbeResult<StepResult> {
         if self.halted {
             return Ok(StepResult::Done);
         }
@@ -449,28 +457,40 @@ impl Vdbe {
                     self.regs[op.p2 as usize] = self.regs[op.p1 as usize].clone();
                 }
                 Opcode::AddInt => {
-                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                    if let (Some(a), Some(b)) = (
+                        self.regs[op.p1 as usize].to_int(),
+                        self.regs[op.p2 as usize].to_int(),
+                    ) {
                         self.regs[op.p3 as usize] = Mem::Int(b + a);
                     } else {
                         return Err(VdbeError::Exec("Type mismatch in AddInt".to_string()));
                     }
                 }
                 Opcode::SubtractInt => {
-                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                    if let (Some(a), Some(b)) = (
+                        self.regs[op.p1 as usize].to_int(),
+                        self.regs[op.p2 as usize].to_int(),
+                    ) {
                         self.regs[op.p3 as usize] = Mem::Int(b - a);
                     } else {
                         return Err(VdbeError::Exec("Type mismatch in SubtractInt".to_string()));
                     }
                 }
                 Opcode::MultiplyInt => {
-                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                    if let (Some(a), Some(b)) = (
+                        self.regs[op.p1 as usize].to_int(),
+                        self.regs[op.p2 as usize].to_int(),
+                    ) {
                         self.regs[op.p3 as usize] = Mem::Int(b * a);
                     } else {
                         return Err(VdbeError::Exec("Type mismatch in MultiplyInt".to_string()));
                     }
                 }
                 Opcode::DivideInt => {
-                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                    if let (Some(a), Some(b)) = (
+                        self.regs[op.p1 as usize].to_int(),
+                        self.regs[op.p2 as usize].to_int(),
+                    ) {
                         if a == 0 {
                             return Err(VdbeError::Exec("Division by zero".to_string()));
                         }
@@ -480,7 +500,10 @@ impl Vdbe {
                     }
                 }
                 Opcode::RemainderInt => {
-                    if let (Some(a), Some(b)) = (self.regs[op.p1 as usize].to_int(), self.regs[op.p2 as usize].to_int()) {
+                    if let (Some(a), Some(b)) = (
+                        self.regs[op.p1 as usize].to_int(),
+                        self.regs[op.p2 as usize].to_int(),
+                    ) {
                         if a == 0 {
                             return Err(VdbeError::Exec("Division by zero".to_string()));
                         }
@@ -496,7 +519,9 @@ impl Vdbe {
                         (Some(a), Some(b)) => a == b,
                         _ => lhs == rhs,
                     };
-                    if eq { self.pc = op.p2 as usize; }
+                    if eq {
+                        self.pc = op.p2 as usize;
+                    }
                 }
                 Opcode::Ne => {
                     let lhs = &self.regs[op.p3 as usize];
@@ -505,7 +530,9 @@ impl Vdbe {
                         (Some(a), Some(b)) => a != b,
                         _ => lhs != rhs,
                     };
-                    if ne { self.pc = op.p2 as usize; }
+                    if ne {
+                        self.pc = op.p2 as usize;
+                    }
                 }
                 Opcode::Lt => {
                     let lhs = &self.regs[op.p3 as usize];
@@ -514,16 +541,23 @@ impl Vdbe {
                         (Some(a), Some(b)) => a < b,
                         _ => lhs.cmp(rhs) == std::cmp::Ordering::Less,
                     };
-                    if lt { self.pc = op.p2 as usize; }
+                    if lt {
+                        self.pc = op.p2 as usize;
+                    }
                 }
                 Opcode::Le => {
                     let lhs = &self.regs[op.p3 as usize];
                     let rhs = &self.regs[op.p1 as usize];
                     let le = match (lhs.to_real(), rhs.to_real()) {
                         (Some(a), Some(b)) => a <= b,
-                        _ => matches!(lhs.cmp(rhs), std::cmp::Ordering::Less | std::cmp::Ordering::Equal),
+                        _ => matches!(
+                            lhs.cmp(rhs),
+                            std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                        ),
                     };
-                    if le { self.pc = op.p2 as usize; }
+                    if le {
+                        self.pc = op.p2 as usize;
+                    }
                 }
                 Opcode::Gt => {
                     let lhs = &self.regs[op.p3 as usize];
@@ -532,16 +566,23 @@ impl Vdbe {
                         (Some(a), Some(b)) => a > b,
                         _ => lhs.cmp(rhs) == std::cmp::Ordering::Greater,
                     };
-                    if gt { self.pc = op.p2 as usize; }
+                    if gt {
+                        self.pc = op.p2 as usize;
+                    }
                 }
                 Opcode::Ge => {
                     let lhs = &self.regs[op.p3 as usize];
                     let rhs = &self.regs[op.p1 as usize];
                     let ge = match (lhs.to_real(), rhs.to_real()) {
                         (Some(a), Some(b)) => a >= b,
-                        _ => matches!(lhs.cmp(rhs), std::cmp::Ordering::Greater | std::cmp::Ordering::Equal),
+                        _ => matches!(
+                            lhs.cmp(rhs),
+                            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                        ),
                     };
-                    if ge { self.pc = op.p2 as usize; }
+                    if ge {
+                        self.pc = op.p2 as usize;
+                    }
                 }
                 Opcode::CreateTable => {
                     let pgno = btree.allocate_page(PageKind::TableLeaf)?;
@@ -581,7 +622,9 @@ impl Vdbe {
                             Mem::Text(v) => liter_record::Value::Text(v.as_bytes().to_vec()),
                             Mem::Blob(v) => liter_record::Value::Blob(v.to_vec()),
                             Mem::ZeroBlob(n) => liter_record::Value::ZeroBlob(*n),
-                            Mem::Agg(_) => return Err(VdbeError::Exec("Cannot serialize Aggregate".into())),
+                            Mem::Agg(_) => {
+                                return Err(VdbeError::Exec("Cannot serialize Aggregate".into()))
+                            }
                         };
                         values.push(val);
                     }
@@ -607,7 +650,9 @@ impl Vdbe {
                     };
 
                     if let Some(cursor) = &mut cursors[cursor_idx] {
-                        cursor.as_btree_mut()?.insert(&rowid.to_be_bytes(), &record, false)?;
+                        cursor
+                            .as_btree_mut()?
+                            .insert(&rowid.to_be_bytes(), &record, false)?;
                     } else {
                         return Err(VdbeError::Exec("invalid cursor".to_string()));
                     }
@@ -620,7 +665,6 @@ impl Vdbe {
                 }
 
                 // ── Read-scan opcodes ──────────────────────────────────────────
-
                 Opcode::OpenRead => {
                     let cursor_idx = op.p1 as usize;
                     let root_page = op.p2 as u32;
@@ -633,7 +677,8 @@ impl Vdbe {
                 Opcode::Rewind => {
                     let cursor_idx = op.p1 as usize;
                     let jump_addr = op.p2 as usize;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree_mut()?;
                     let has_rows = cursor.move_to_first()?;
@@ -646,7 +691,8 @@ impl Vdbe {
                     let cursor_idx = op.p1 as usize;
                     let loop_addr = op.p2 as usize;
                     let after_delete = op.p5 != 0;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree_mut()?;
                     let has_next = if after_delete && cursor.is_valid() {
@@ -662,7 +708,8 @@ impl Vdbe {
                 Opcode::Prev => {
                     let cursor_idx = op.p1 as usize;
                     let loop_addr = op.p2 as usize;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree_mut()?;
                     if cursor.previous()? {
@@ -673,7 +720,8 @@ impl Vdbe {
                 Opcode::Last => {
                     let cursor_idx = op.p1 as usize;
                     let jump_addr = op.p2 as usize;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree_mut()?;
                     let has_rows = cursor.move_to_last()?;
@@ -686,14 +734,17 @@ impl Vdbe {
                     let cursor_idx = op.p1 as usize;
                     let col_idx = op.p2 as usize;
                     let dest_reg = op.p3 as usize;
-                    let cursor = cursors[cursor_idx].as_ref()
+                    let cursor = cursors[cursor_idx]
+                        .as_ref()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
                     let data: &[u8] = match cursor {
                         VdbeCursor::BTree(c) => c.data()?,
                         VdbeCursor::Sorter(s) => &s.records[s.pos],
                     };
                     let fields = liter_record::decode_record(data)?;
-                    let val = fields.into_iter().nth(col_idx)
+                    let val = fields
+                        .into_iter()
+                        .nth(col_idx)
                         .unwrap_or(liter_record::Value::Null);
                     self.regs[dest_reg] = match val {
                         liter_record::Value::Null => Mem::Null,
@@ -711,7 +762,8 @@ impl Vdbe {
                 Opcode::RowId => {
                     let cursor_idx = op.p1 as usize;
                     let dest_reg = op.p2 as usize;
-                    let cursor = cursors[cursor_idx].as_ref()
+                    let cursor = cursors[cursor_idx]
+                        .as_ref()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree()?;
                     self.regs[dest_reg] = Mem::Int(cursor.rowid()?);
@@ -725,7 +777,6 @@ impl Vdbe {
                 }
 
                 // ── Conditional branching ──────────────────────────────────────
-
                 Opcode::If => {
                     if self.regs[op.p1 as usize].is_truthy() {
                         self.pc = op.p2 as usize;
@@ -751,29 +802,33 @@ impl Vdbe {
                 }
 
                 // ── Mutation opcodes ───────────────────────────────────────────
-
                 Opcode::Delete => {
                     let cursor_idx = op.p1 as usize;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree_mut()?;
                     cursor.delete()?;
                 }
 
                 // ── Seek opcodes ───────────────────────────────────────────────
-
                 Opcode::SeekGe => {
                     let cursor_idx = op.p1 as usize;
                     let jump_addr = op.p2 as usize;
                     let reg_idx = op.p3 as usize;
-                    
+
                     let key_val = self.regs[reg_idx].to_int().unwrap_or(0) as u64;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree_mut()?;
-                    
-                    let result = cursor.move_to(&key_val.to_be_bytes(), liter_btree::SeekBias::Ge)?;
-                    if matches!(result, liter_btree::SeekResult::Empty | liter_btree::SeekResult::Less) {
+
+                    let result =
+                        cursor.move_to(&key_val.to_be_bytes(), liter_btree::SeekBias::Ge)?;
+                    if matches!(
+                        result,
+                        liter_btree::SeekResult::Empty | liter_btree::SeekResult::Less
+                    ) {
                         self.pc = jump_addr;
                     }
                 }
@@ -782,14 +837,21 @@ impl Vdbe {
                     let cursor_idx = op.p1 as usize;
                     let jump_addr = op.p2 as usize;
                     let reg_idx = op.p3 as usize;
-                    
+
                     let key_val = self.regs[reg_idx].to_int().unwrap_or(0) as u64;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree_mut()?;
-                    
-                    let result = cursor.move_to(&key_val.to_be_bytes(), liter_btree::SeekBias::Gt)?;
-                    if matches!(result, liter_btree::SeekResult::Empty | liter_btree::SeekResult::Less | liter_btree::SeekResult::Equal) {
+
+                    let result =
+                        cursor.move_to(&key_val.to_be_bytes(), liter_btree::SeekBias::Gt)?;
+                    if matches!(
+                        result,
+                        liter_btree::SeekResult::Empty
+                            | liter_btree::SeekResult::Less
+                            | liter_btree::SeekResult::Equal
+                    ) {
                         if matches!(result, liter_btree::SeekResult::Equal) {
                             if !cursor.next()? {
                                 self.pc = jump_addr;
@@ -804,16 +866,22 @@ impl Vdbe {
                     let cursor_idx = op.p1 as usize;
                     let jump_addr = op.p2 as usize;
                     let reg_idx = op.p3 as usize;
-                    
+
                     let key_val = self.regs[reg_idx].to_int().unwrap_or(0) as u64;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree_mut()?;
-                    
-                    let result = cursor.move_to(&key_val.to_be_bytes(), liter_btree::SeekBias::Ge)?;
+
+                    let result =
+                        cursor.move_to(&key_val.to_be_bytes(), liter_btree::SeekBias::Ge)?;
                     match result {
-                        liter_btree::SeekResult::Empty => { self.pc = jump_addr; }
-                        liter_btree::SeekResult::Greater if !cursor.previous()? => { self.pc = jump_addr; }
+                        liter_btree::SeekResult::Empty => {
+                            self.pc = jump_addr;
+                        }
+                        liter_btree::SeekResult::Greater if !cursor.previous()? => {
+                            self.pc = jump_addr;
+                        }
                         liter_btree::SeekResult::Greater => {}
                         _ => {}
                     }
@@ -823,17 +891,23 @@ impl Vdbe {
                     let cursor_idx = op.p1 as usize;
                     let jump_addr = op.p2 as usize;
                     let reg_idx = op.p3 as usize;
-                    
+
                     let key_val = self.regs[reg_idx].to_int().unwrap_or(0) as u64;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?
                         .as_btree_mut()?;
-                    
-                    let result = cursor.move_to(&key_val.to_be_bytes(), liter_btree::SeekBias::Ge)?;
+
+                    let result =
+                        cursor.move_to(&key_val.to_be_bytes(), liter_btree::SeekBias::Ge)?;
                     match result {
-                        liter_btree::SeekResult::Empty => { self.pc = jump_addr; }
+                        liter_btree::SeekResult::Empty => {
+                            self.pc = jump_addr;
+                        }
                         liter_btree::SeekResult::Equal | liter_btree::SeekResult::Greater => {
-                            if !cursor.previous()? { self.pc = jump_addr; }
+                            if !cursor.previous()? {
+                                self.pc = jump_addr;
+                            }
                         }
                         liter_btree::SeekResult::Less => {}
                     }
@@ -849,14 +923,15 @@ impl Vdbe {
                         return Err(VdbeError::Exec("record must be blob".to_string()));
                     };
                     if let Some(cursor) = &mut cursors[cursor_idx] {
-                        cursor.as_btree_mut()?.insert(&rowid.to_be_bytes(), &record, false)?;
+                        cursor
+                            .as_btree_mut()?
+                            .insert(&rowid.to_be_bytes(), &record, false)?;
                     } else {
                         return Err(VdbeError::Exec("invalid cursor".to_string()));
                     }
                 }
 
                 // ── Limit & Loop Control ───────────────────────────────────────
-
                 Opcode::DecrJumpZero => {
                     let reg_idx = op.p1 as usize;
                     let jump_addr = op.p2 as usize;
@@ -865,7 +940,9 @@ impl Vdbe {
                             *i -= 1;
                             *i
                         }
-                        _ => return Err(VdbeError::Exec("DecrJumpZero on non-integer".to_string())),
+                        _ => {
+                            return Err(VdbeError::Exec("DecrJumpZero on non-integer".to_string()))
+                        }
                     };
                     if count <= 0 {
                         self.pc = jump_addr;
@@ -873,7 +950,6 @@ impl Vdbe {
                 }
 
                 // ── Sorting ────────────────────────────────────────────────────
-
                 Opcode::SorterOpen => {
                     let cursor_idx = op.p1 as usize;
                     if cursor_idx >= cursors.len() {
@@ -891,13 +967,17 @@ impl Vdbe {
                     let record = if let Mem::Blob(b) = &self.regs[record_reg] {
                         b.to_vec()
                     } else {
-                        return Err(VdbeError::Exec("SorterInsert record must be a Blob".to_string()));
+                        return Err(VdbeError::Exec(
+                            "SorterInsert record must be a Blob".to_string(),
+                        ));
                     };
                     if let Some(cursor) = &mut cursors[cursor_idx] {
                         let sorter = cursor.as_sorter_mut()?;
                         sorter.records.push(record);
                     } else {
-                        return Err(VdbeError::Exec("cursor not open for SorterInsert".to_string()));
+                        return Err(VdbeError::Exec(
+                            "cursor not open for SorterInsert".to_string(),
+                        ));
                     }
                 }
 
@@ -914,16 +994,24 @@ impl Vdbe {
                                     liter_record::Value::Null => Mem::Null,
                                     liter_record::Value::Int(i) => Mem::Int(*i),
                                     liter_record::Value::Real(f) => Mem::Real(*f),
-                                    liter_record::Value::Text(t) => Mem::Text(Arc::from(String::from_utf8_lossy(t).as_ref())),
-                                    liter_record::Value::Blob(b) => Mem::Blob(Arc::from(b.as_slice())),
+                                    liter_record::Value::Text(t) => {
+                                        Mem::Text(Arc::from(String::from_utf8_lossy(t).as_ref()))
+                                    }
+                                    liter_record::Value::Blob(b) => {
+                                        Mem::Blob(Arc::from(b.as_slice()))
+                                    }
                                     liter_record::Value::ZeroBlob(n) => Mem::ZeroBlob(*n),
                                 };
                                 let mem_b = match fb {
                                     liter_record::Value::Null => Mem::Null,
                                     liter_record::Value::Int(i) => Mem::Int(*i),
                                     liter_record::Value::Real(f) => Mem::Real(*f),
-                                    liter_record::Value::Text(t) => Mem::Text(Arc::from(String::from_utf8_lossy(t).as_ref())),
-                                    liter_record::Value::Blob(b) => Mem::Blob(Arc::from(b.as_slice())),
+                                    liter_record::Value::Text(t) => {
+                                        Mem::Text(Arc::from(String::from_utf8_lossy(t).as_ref()))
+                                    }
+                                    liter_record::Value::Blob(b) => {
+                                        Mem::Blob(Arc::from(b.as_slice()))
+                                    }
                                     liter_record::Value::ZeroBlob(n) => Mem::ZeroBlob(*n),
                                 };
                                 let cmp = mem_a.cmp(&mem_b);
@@ -938,14 +1026,17 @@ impl Vdbe {
                             self.pc = jump_addr;
                         }
                     } else {
-                        return Err(VdbeError::Exec("cursor not open for SorterSort".to_string()));
+                        return Err(VdbeError::Exec(
+                            "cursor not open for SorterSort".to_string(),
+                        ));
                     }
                 }
 
                 Opcode::SorterData => {
                     let cursor_idx = op.p1 as usize;
                     let dest_reg = op.p2 as usize;
-                    let cursor = cursors[cursor_idx].as_ref()
+                    let cursor = cursors[cursor_idx]
+                        .as_ref()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
                     if let VdbeCursor::Sorter(sorter) = cursor {
                         let record = &sorter.records[sorter.pos];
@@ -958,7 +1049,8 @@ impl Vdbe {
                 Opcode::SorterNext => {
                     let cursor_idx = op.p1 as usize;
                     let loop_addr = op.p2 as usize;
-                    let cursor = cursors[cursor_idx].as_mut()
+                    let cursor = cursors[cursor_idx]
+                        .as_mut()
                         .ok_or_else(|| VdbeError::Exec("invalid cursor".to_string()))?;
                     if let VdbeCursor::Sorter(sorter) = cursor {
                         sorter.pos += 1;
@@ -971,16 +1063,19 @@ impl Vdbe {
                 }
 
                 // ── Functions ──────────────────────────────────────────────────
-
                 Opcode::Function => {
                     let argc = op.p1 as usize;
                     let arg_reg = op.p2 as usize;
                     let dest_reg = op.p3 as usize;
                     let func_name = match &op.p4 {
                         P4::Text(s) => s.to_string(),
-                        _ => return Err(VdbeError::Exec("Function p4 must be func name".to_string())),
+                        _ => {
+                            return Err(VdbeError::Exec(
+                                "Function p4 must be func name".to_string(),
+                            ))
+                        }
                     };
-                    
+
                     let args = if argc > 0 {
                         &self.regs[arg_reg..(arg_reg + argc)]
                     } else {
@@ -990,10 +1085,18 @@ impl Vdbe {
                     if let Some(dispatcher) = self.func_dispatcher {
                         match dispatcher(&func_name, args) {
                             Ok(res) => self.regs[dest_reg] = res,
-                            Err(e) => return Err(VdbeError::Exec(format!("Function {}: {}", func_name, e))),
+                            Err(e) => {
+                                return Err(VdbeError::Exec(format!(
+                                    "Function {}: {}",
+                                    func_name, e
+                                )))
+                            }
                         }
                     } else {
-                        return Err(VdbeError::Exec(format!("no function dispatcher available for {}", func_name)));
+                        return Err(VdbeError::Exec(format!(
+                            "no function dispatcher available for {}",
+                            func_name
+                        )));
                     }
                 }
 
@@ -1003,24 +1106,35 @@ impl Vdbe {
                     let dest_reg = op.p3 as usize; // Holds Mem::Agg(idx)
                     let func_name = match &op.p4 {
                         P4::Text(s) => s.to_string(),
-                        _ => return Err(VdbeError::Exec("AggStep p4 must be func name".to_string())),
+                        _ => {
+                            return Err(VdbeError::Exec("AggStep p4 must be func name".to_string()))
+                        }
                     };
 
                     // Initialize the accumulator if it is Null.
                     if self.regs[dest_reg].is_null() {
                         if let Some(dispatcher) = self.agg_dispatcher {
-                            let agg_state = dispatcher(&func_name).map_err(|e| VdbeError::Exec(format!("AggStep {}: {}", func_name, e)))?;
+                            let agg_state = dispatcher(&func_name).map_err(|e| {
+                                VdbeError::Exec(format!("AggStep {}: {}", func_name, e))
+                            })?;
                             let idx = self.aggs.len();
                             self.aggs.push(agg_state);
                             self.regs[dest_reg] = Mem::Agg(idx);
                         } else {
-                            return Err(VdbeError::Exec(format!("no agg dispatcher available for {}", func_name)));
+                            return Err(VdbeError::Exec(format!(
+                                "no agg dispatcher available for {}",
+                                func_name
+                            )));
                         }
                     }
 
                     let idx = match self.regs[dest_reg] {
                         Mem::Agg(i) => i,
-                        _ => return Err(VdbeError::Exec("AggStep destination is not an aggregate".to_string())),
+                        _ => {
+                            return Err(VdbeError::Exec(
+                                "AggStep destination is not an aggregate".to_string(),
+                            ))
+                        }
                     };
 
                     let args = if argc > 0 {
@@ -1030,7 +1144,9 @@ impl Vdbe {
                     };
 
                     if let Some(agg_state) = self.aggs.get_mut(idx) {
-                        agg_state.step(args).map_err(|e| VdbeError::Exec(format!("AggStep {}: {}", func_name, e)))?;
+                        agg_state.step(args).map_err(|e| {
+                            VdbeError::Exec(format!("AggStep {}: {}", func_name, e))
+                        })?;
                     } else {
                         return Err(VdbeError::Exec("Invalid aggregate index".to_string()));
                     }
@@ -1040,26 +1156,41 @@ impl Vdbe {
                     let dest_reg = op.p1 as usize;
                     let func_name = match &op.p4 {
                         P4::Text(s) => s.to_string(),
-                        _ => return Err(VdbeError::Exec("AggFinal p4 must be func name".to_string())),
+                        _ => {
+                            return Err(VdbeError::Exec(
+                                "AggFinal p4 must be func name".to_string(),
+                            ))
+                        }
                     };
 
                     if self.regs[dest_reg].is_null() {
                         // If no rows were processed, initialize to compute empty-set final value.
                         if let Some(dispatcher) = self.agg_dispatcher {
-                            let mut agg_state = dispatcher(&func_name).map_err(|e| VdbeError::Exec(format!("AggFinal {}: {}", func_name, e)))?;
-                            self.regs[dest_reg] = agg_state.finalize().map_err(|e| VdbeError::Exec(format!("AggFinal {}: {}", func_name, e)))?;
+                            let mut agg_state = dispatcher(&func_name).map_err(|e| {
+                                VdbeError::Exec(format!("AggFinal {}: {}", func_name, e))
+                            })?;
+                            self.regs[dest_reg] = agg_state.finalize().map_err(|e| {
+                                VdbeError::Exec(format!("AggFinal {}: {}", func_name, e))
+                            })?;
                         } else {
-                            return Err(VdbeError::Exec(format!("no agg dispatcher available for {}", func_name)));
+                            return Err(VdbeError::Exec(format!(
+                                "no agg dispatcher available for {}",
+                                func_name
+                            )));
                         }
                     } else if let Mem::Agg(idx) = self.regs[dest_reg] {
                         if let Some(agg_state) = self.aggs.get_mut(idx) {
-                            let final_val = agg_state.finalize().map_err(|e| VdbeError::Exec(format!("AggFinal {}: {}", func_name, e)))?;
+                            let final_val = agg_state.finalize().map_err(|e| {
+                                VdbeError::Exec(format!("AggFinal {}: {}", func_name, e))
+                            })?;
                             self.regs[dest_reg] = final_val;
                         } else {
                             return Err(VdbeError::Exec("Invalid aggregate index".to_string()));
                         }
                     } else {
-                        return Err(VdbeError::Exec("AggFinal destination is not an aggregate".to_string()));
+                        return Err(VdbeError::Exec(
+                            "AggFinal destination is not an aggregate".to_string(),
+                        ));
                     }
                 }
 
@@ -1070,9 +1201,8 @@ impl Vdbe {
                 Opcode::Noop => {}
                 _ => return Err(VdbeError::NotImplemented),
             }
-
         }
-        
+
         self.halted = true;
         self.last_result_row = None;
         Ok(StepResult::Done)
@@ -1092,8 +1222,6 @@ impl Vdbe {
         Ok(())
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

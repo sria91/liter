@@ -55,7 +55,9 @@ struct SumState {
 impl liter_vdbe::AggregateState for SumState {
     fn step(&mut self, args: &[Mem]) -> Result<(), String> {
         if let Some(val) = args.first() {
-            if val.is_null() { return Ok(()); }
+            if val.is_null() {
+                return Ok(());
+            }
             match &self.sum {
                 None => {
                     self.sum = match val {
@@ -64,24 +66,22 @@ impl liter_vdbe::AggregateState for SumState {
                         v => Some(Mem::Real(v.to_real().unwrap_or(0.0))),
                     };
                 }
-                Some(Mem::Int(acc)) => {
-                    match val {
-                        Mem::Int(i) => {
-                            if let Some(new_acc) = acc.checked_add(*i) {
-                                self.sum = Some(Mem::Int(new_acc));
-                            } else {
-                                self.sum = Some(Mem::Real(*acc as f64 + *i as f64));
-                            }
-                        }
-                        Mem::Real(f) => {
-                            self.sum = Some(Mem::Real(*acc as f64 + f));
-                        }
-                        v => {
-                            let f = v.to_real().unwrap_or(0.0);
-                            self.sum = Some(Mem::Real(*acc as f64 + f));
+                Some(Mem::Int(acc)) => match val {
+                    Mem::Int(i) => {
+                        if let Some(new_acc) = acc.checked_add(*i) {
+                            self.sum = Some(Mem::Int(new_acc));
+                        } else {
+                            self.sum = Some(Mem::Real(*acc as f64 + *i as f64));
                         }
                     }
-                }
+                    Mem::Real(f) => {
+                        self.sum = Some(Mem::Real(*acc as f64 + f));
+                    }
+                    v => {
+                        let f = v.to_real().unwrap_or(0.0);
+                        self.sum = Some(Mem::Real(*acc as f64 + f));
+                    }
+                },
                 Some(Mem::Real(acc)) => {
                     self.sum = Some(Mem::Real(*acc + val.to_real().unwrap_or(0.0)));
                 }
@@ -216,13 +216,13 @@ pub fn func_length(args: &[Mem]) -> FuncResult<Mem> {
 
 pub fn func_typeof(args: &[Mem]) -> FuncResult<Mem> {
     let t = match args.first() {
-        Some(Mem::Null)     => "null",
-        Some(Mem::Int(_))   => "integer",
-        Some(Mem::Real(_))  => "real",
-        Some(Mem::Text(_))  => "text",
+        Some(Mem::Null) => "null",
+        Some(Mem::Int(_)) => "integer",
+        Some(Mem::Real(_)) => "real",
+        Some(Mem::Text(_)) => "text",
         Some(Mem::Blob(_)) | Some(Mem::ZeroBlob(_)) => "blob",
-        None                => "null",
-        Some(Mem::Agg(_))   => "blob", // Treat aggregators as blobs from SQL perspective
+        None => "null",
+        Some(Mem::Agg(_)) => "blob", // Treat aggregators as blobs from SQL perspective
     };
     Ok(Mem::Text(std::sync::Arc::from(t)))
 }
@@ -277,17 +277,17 @@ pub fn func_substr(args: &[Mem]) -> FuncResult<Mem> {
         Some(Mem::Null) | None => return Ok(Mem::Null),
         Some(m) => mem_to_string(m),
     };
-    
+
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len() as i64;
-    
+
     let start = match &args[1] {
         Mem::Int(i) => *i,
         Mem::Real(f) => *f as i64,
         Mem::Text(t) => t.parse().unwrap_or(0),
         _ => return Ok(Mem::Null),
     };
-    
+
     let start_idx = if start > 0 {
         start - 1
     } else if start < 0 {
@@ -295,7 +295,7 @@ pub fn func_substr(args: &[Mem]) -> FuncResult<Mem> {
     } else {
         0
     };
-    
+
     let length = if args.len() == 3 {
         match &args[2] {
             Mem::Int(i) => Some(*i),
@@ -306,22 +306,26 @@ pub fn func_substr(args: &[Mem]) -> FuncResult<Mem> {
     } else {
         None
     };
-    
+
     if let Some(l) = length {
         if l < 0 {
             let l_abs = l.abs();
             let new_start = (start_idx - l_abs).max(0);
             let end_idx = start_idx.min(len).max(0);
-            let sub = chars[new_start as usize..end_idx as usize].iter().collect::<String>();
+            let sub = chars[new_start as usize..end_idx as usize]
+                .iter()
+                .collect::<String>();
             return Ok(Mem::Text(std::sync::Arc::from(sub.as_str())));
         }
     }
-    
+
     let actual_len = length.unwrap_or(len - start_idx);
     let end_idx = (start_idx + actual_len).min(len).max(0);
     let start_idx = start_idx.min(len).max(0);
-    
-    let sub = chars[start_idx as usize..end_idx as usize].iter().collect::<String>();
+
+    let sub = chars[start_idx as usize..end_idx as usize]
+        .iter()
+        .collect::<String>();
     Ok(Mem::Text(std::sync::Arc::from(sub.as_str())))
 }
 
@@ -339,7 +343,7 @@ pub fn func_instr(args: &[Mem]) -> FuncResult<Mem> {
         Mem::Null => return Ok(Mem::Null),
         m => mem_to_string(m),
     };
-    
+
     if let Some(pos) = haystack.find(&needle) {
         let char_pos = haystack[..pos].chars().count() + 1;
         Ok(Mem::Int(char_pos as i64))
@@ -367,7 +371,7 @@ pub fn func_replace(args: &[Mem]) -> FuncResult<Mem> {
         Mem::Null => return Ok(Mem::Null),
         m => mem_to_string(m),
     };
-    
+
     let result = haystack.replace(&pattern, &replacement);
     Ok(Mem::Text(std::sync::Arc::from(result.as_str())))
 }
@@ -381,7 +385,7 @@ pub fn func_trim(args: &[Mem]) -> FuncResult<Mem> {
         Mem::Null => return Ok(Mem::Null),
         m => mem_to_string(m),
     };
-    
+
     let chars_to_trim = if args.len() == 2 {
         match &args[1] {
             Mem::Text(t) => t.to_string(),
@@ -390,7 +394,7 @@ pub fn func_trim(args: &[Mem]) -> FuncResult<Mem> {
     } else {
         " ".to_string()
     };
-    
+
     let trimmed = s.trim_matches(|c| chars_to_trim.contains(c));
     Ok(Mem::Text(std::sync::Arc::from(trimmed)))
 }
@@ -441,7 +445,7 @@ fn parse_datetime(args: &[Mem]) -> FuncResult<Option<chrono::DateTime<chrono::Ut
         Mem::Null => return Ok(None),
         _ => return Ok(None),
     };
-    
+
     if time_val.eq_ignore_ascii_case("now") {
         Ok(Some(chrono::Utc::now()))
     } else {
@@ -520,7 +524,7 @@ pub fn func_round(args: &[Mem]) -> FuncResult<Mem> {
         Mem::Text(s) => s.parse::<f64>().unwrap_or(0.0),
         _ => 0.0,
     };
-    
+
     let digits = if args.len() > 1 {
         match &args[1] {
             Mem::Int(i) => *i,
@@ -530,7 +534,7 @@ pub fn func_round(args: &[Mem]) -> FuncResult<Mem> {
     } else {
         0
     };
-    
+
     if digits == 0 {
         Ok(Mem::Real(val.round()))
     } else {
@@ -542,7 +546,13 @@ pub fn func_round(args: &[Mem]) -> FuncResult<Mem> {
 pub fn func_sign(args: &[Mem]) -> FuncResult<Mem> {
     match args.first() {
         Some(Mem::Int(i)) => Ok(Mem::Int(i.signum())),
-        Some(Mem::Real(f)) => Ok(Mem::Int(if *f > 0.0 { 1 } else if *f < 0.0 { -1 } else { 0 })),
+        Some(Mem::Real(f)) => Ok(Mem::Int(if *f > 0.0 {
+            1
+        } else if *f < 0.0 {
+            -1
+        } else {
+            0
+        })),
         Some(Mem::Null) | None => Ok(Mem::Null),
         _ => Ok(Mem::Int(0)),
     }
@@ -570,8 +580,14 @@ mod tests {
 
     #[test]
     fn typeof_values() {
-        assert_eq!(func_typeof(&[Mem::Int(1)]).unwrap(), Mem::Text(std::sync::Arc::from("integer")));
-        assert_eq!(func_typeof(&[Mem::Null]).unwrap(), Mem::Text(std::sync::Arc::from("null")));
+        assert_eq!(
+            func_typeof(&[Mem::Int(1)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("integer"))
+        );
+        assert_eq!(
+            func_typeof(&[Mem::Null]).unwrap(),
+            Mem::Text(std::sync::Arc::from("null"))
+        );
     }
 
     #[test]
@@ -584,7 +600,7 @@ mod tests {
     fn test_max_scalar() {
         let args = [Mem::Int(10), Mem::Int(42), Mem::Int(-5)];
         assert_eq!(func_max_scalar(&args).unwrap(), Mem::Int(42));
-        
+
         let mixed = [Mem::Int(10), Mem::Real(15.5)];
         assert_eq!(func_max_scalar(&mixed).unwrap(), Mem::Real(15.5));
     }
@@ -593,7 +609,7 @@ mod tests {
     fn test_min_scalar() {
         let args = [Mem::Int(10), Mem::Int(42), Mem::Int(-5)];
         assert_eq!(func_min_scalar(&args).unwrap(), Mem::Int(-5));
-        
+
         let with_null = [Mem::Int(10), Mem::Null, Mem::Int(-5)];
         assert_eq!(func_min_scalar(&with_null).unwrap(), Mem::Null);
     }
@@ -601,55 +617,96 @@ mod tests {
     #[test]
     #[allow(clippy::approx_constant)]
     fn test_round() {
-        assert_eq!(func_round(&[Mem::Real(std::f64::consts::PI), Mem::Int(2)]).unwrap(), Mem::Real(3.14));
-        assert_eq!(func_round(&[Mem::Real(std::f64::consts::PI)]).unwrap(), Mem::Real(3.0));
+        assert_eq!(
+            func_round(&[Mem::Real(std::f64::consts::PI), Mem::Int(2)]).unwrap(),
+            Mem::Real(3.14)
+        );
+        assert_eq!(
+            func_round(&[Mem::Real(std::f64::consts::PI)]).unwrap(),
+            Mem::Real(3.0)
+        );
     }
 
     #[test]
     #[allow(clippy::approx_constant)]
     fn test_sign() {
         assert_eq!(func_sign(&[Mem::Int(-42)]).unwrap(), Mem::Int(-1));
-        assert_eq!(func_sign(&[Mem::Real(std::f64::consts::PI)]).unwrap(), Mem::Int(1));
+        assert_eq!(
+            func_sign(&[Mem::Real(std::f64::consts::PI)]).unwrap(),
+            Mem::Int(1)
+        );
         assert_eq!(func_sign(&[Mem::Int(0)]).unwrap(), Mem::Int(0));
     }
 
     #[test]
     fn test_substr() {
         let text = Mem::Text(std::sync::Arc::from("hello world"));
-        
+
         // substr('hello world', 1, 5) -> 'hello'
-        assert_eq!(func_substr(&[text.clone(), Mem::Int(1), Mem::Int(5)]).unwrap(), Mem::Text(std::sync::Arc::from("hello")));
-        
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Int(1), Mem::Int(5)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("hello"))
+        );
+
         // substr('hello world', 7) -> 'world'
-        assert_eq!(func_substr(&[text.clone(), Mem::Int(7)]).unwrap(), Mem::Text(std::sync::Arc::from("world")));
-        
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Int(7)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("world"))
+        );
+
         // substr('hello world', -5, 3) -> 'wor'
-        assert_eq!(func_substr(&[text.clone(), Mem::Int(-5), Mem::Int(3)]).unwrap(), Mem::Text(std::sync::Arc::from("wor")));
-        
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Int(-5), Mem::Int(3)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("wor"))
+        );
+
         // substr('hello world', 7, -3) -> 'lo '
-        assert_eq!(func_substr(&[text.clone(), Mem::Int(7), Mem::Int(-3)]).unwrap(), Mem::Text(std::sync::Arc::from("lo ")));
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Int(7), Mem::Int(-3)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("lo "))
+        );
     }
 
     #[test]
     fn test_instr() {
         let text = Mem::Text(std::sync::Arc::from("hello world"));
-        assert_eq!(func_instr(&[text.clone(), Mem::Text(std::sync::Arc::from("world"))]).unwrap(), Mem::Int(7));
-        assert_eq!(func_instr(&[text.clone(), Mem::Text(std::sync::Arc::from("x"))]).unwrap(), Mem::Int(0));
+        assert_eq!(
+            func_instr(&[text.clone(), Mem::Text(std::sync::Arc::from("world"))]).unwrap(),
+            Mem::Int(7)
+        );
+        assert_eq!(
+            func_instr(&[text.clone(), Mem::Text(std::sync::Arc::from("x"))]).unwrap(),
+            Mem::Int(0)
+        );
     }
 
     #[test]
     fn test_replace() {
         let text = Mem::Text(std::sync::Arc::from("hello world"));
-        assert_eq!(func_replace(&[text.clone(), Mem::Text(std::sync::Arc::from("world")), Mem::Text(std::sync::Arc::from("rust"))]).unwrap(), Mem::Text(std::sync::Arc::from("hello rust")));
+        assert_eq!(
+            func_replace(&[
+                text.clone(),
+                Mem::Text(std::sync::Arc::from("world")),
+                Mem::Text(std::sync::Arc::from("rust"))
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from("hello rust"))
+        );
     }
 
     #[test]
     fn test_trim() {
         let text = Mem::Text(std::sync::Arc::from("  hello  "));
-        assert_eq!(func_trim(std::slice::from_ref(&text)).unwrap(), Mem::Text(std::sync::Arc::from("hello")));
-        
+        assert_eq!(
+            func_trim(std::slice::from_ref(&text)).unwrap(),
+            Mem::Text(std::sync::Arc::from("hello"))
+        );
+
         let custom_text = Mem::Text(std::sync::Arc::from("xxhelloxx"));
-        assert_eq!(func_trim(&[custom_text, Mem::Text(std::sync::Arc::from("x"))]).unwrap(), Mem::Text(std::sync::Arc::from("hello")));
+        assert_eq!(
+            func_trim(&[custom_text, Mem::Text(std::sync::Arc::from("x"))]).unwrap(),
+            Mem::Text(std::sync::Arc::from("hello"))
+        );
     }
 
     #[test]

@@ -83,10 +83,10 @@ bitflags! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum LockLevel {
-    None      = 0,
-    Shared    = 1,
-    Reserved  = 2,
-    Pending   = 3,
+    None = 0,
+    Shared = 1,
+    Reserved = 2,
+    Pending = 3,
     Exclusive = 4,
 }
 

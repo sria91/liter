@@ -31,7 +31,7 @@ fn parse_select_basic() {
 fn parse_select_with_where_and_alias() {
     let sql = "SELECT id as user_id, name FROM users WHERE id = 1";
     let stmt = parse_stmt(sql).unwrap();
-    
+
     if let Stmt::Select(select) = &stmt {
         if let SelectBody::Simple(simple) = &select.body {
             assert_eq!(simple.result_columns.len(), 2);
@@ -52,7 +52,7 @@ fn parse_create_table() {
         if let CreateStmt::Table(table) = create.as_ref() {
             assert_eq!(table.name, "users");
             assert!(table.if_not_exists);
-            
+
             if let CreateTableBody::Columns { columns, .. } = &table.body {
                 assert_eq!(columns.len(), 2);
                 assert_eq!(columns[0].name, "id");
@@ -75,7 +75,7 @@ fn parse_insert() {
     if let Stmt::Insert(insert) = &stmts[0] {
         assert_eq!(insert.table, "users");
         assert_eq!(insert.columns.len(), 2);
-        
+
         if let InsertSource::Values(values) = &insert.source {
             assert_eq!(values.len(), 2);
             assert_eq!(values[0].len(), 2); // 1, 'Alice'
@@ -124,7 +124,7 @@ fn syntax_error_propagation() {
     let sql = "SELECT * FORM users"; // intentional typo 'FORM'
     let result = parse_all(sql);
     assert!(result.is_err());
-    
+
     if let Err(ParseError::SyntaxError(msg)) = result {
         assert!(msg.contains("Ident(\"FORM\")"));
     } else {

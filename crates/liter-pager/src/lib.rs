@@ -72,18 +72,30 @@ pub const DEFAULT_CACHE_SIZE: usize = 2000;
 
 /// WAL checkpoint modes (`SQLITE_CHECKPOINT_*`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckpointMode { Passive, Full, Restart, Truncate }
+pub enum CheckpointMode {
+    Passive,
+    Full,
+    Restart,
+    Truncate,
+}
 
 /// Pager error type.
 #[derive(Debug, thiserror::Error)]
 pub enum PagerError {
-    #[error("I/O error: {0}")]        Io(#[from] std::io::Error),
-    #[error("database is corrupt")]   Corrupt,
-    #[error("out of memory")]         NoMem,
-    #[error("database is busy")]      Busy,
-    #[error("not in a write transaction")] NotInTransaction,
-    #[error("database is read-only")] ReadOnly,
-    #[error("page {0} out of range")] PageOutOfRange(u32),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("database is corrupt")]
+    Corrupt,
+    #[error("out of memory")]
+    NoMem,
+    #[error("database is busy")]
+    Busy,
+    #[error("not in a write transaction")]
+    NotInTransaction,
+    #[error("database is read-only")]
+    ReadOnly,
+    #[error("page {0} out of range")]
+    PageOutOfRange(u32),
 }
 
 pub type PagerResult<T> = Result<T, PagerError>;
@@ -178,7 +190,10 @@ impl WalIndex {
         Self {
             mx_frame: 0,
             salt,
-            frames: vec![WalFrameMeta { pgno: 0, db_size: 0 }], // index 0 unused
+            frames: vec![WalFrameMeta {
+                pgno: 0,
+                db_size: 0,
+            }], // index 0 unused
             page_size,
             cksum,
         }
@@ -222,8 +237,7 @@ impl WalIndex {
 
     /// Byte offset in the WAL file of the header of frame `frame_no`.
     fn frame_hdr_offset(&self, frame_no: u32) -> u64 {
-        WAL_HDR_SIZE
-            + (frame_no as u64 - 1) * (WAL_FRAME_HDR_SIZE + self.page_size as u64)
+        WAL_HDR_SIZE + (frame_no as u64 - 1) * (WAL_FRAME_HDR_SIZE + self.page_size as u64)
     }
 }
 
@@ -240,7 +254,10 @@ impl Wal {
     fn open(db_path: &Path, page_size: u16) -> PagerResult<Self> {
         let path = wal_path(db_path);
         let mut file = OpenOptions::new()
-            .read(true).write(true).create(true).truncate(false)
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
             .open(&path)?;
 
         let file_len = file.metadata()?.len();
@@ -272,11 +289,15 @@ impl Wal {
                 for frame_no in 1..=n_frames {
                     let off = index.frame_hdr_offset(frame_no);
                     let mut fhdr = [0u8; 24];
-                    if pread(&file, off, &mut fhdr).is_err() { break; }
+                    if pread(&file, off, &mut fhdr).is_err() {
+                        break;
+                    }
                     // Validate salt (only include frames with matching salt).
                     let fs1 = u32::from_be_bytes(fhdr[8..12].try_into().unwrap());
                     let fs2 = u32::from_be_bytes(fhdr[12..16].try_into().unwrap());
-                    if fs1 != salt1 || fs2 != salt2 { break; }
+                    if fs1 != salt1 || fs2 != salt2 {
+                        break;
+                    }
                     let pgno = u32::from_be_bytes(fhdr[0..4].try_into().unwrap());
                     let db_size = u32::from_be_bytes(fhdr[4..8].try_into().unwrap());
                     index.frames.push(WalFrameMeta { pgno, db_size });
@@ -324,11 +345,7 @@ impl Wal {
     /// Append a batch of (pgno, data) frames as a single commit.
     ///
     /// `db_size` is the total database size in pages after this commit.
-    fn append_frames(
-        &mut self,
-        frames: &[(PageNumber, Vec<u8>)],
-        db_size: u32,
-    ) -> PagerResult<()> {
+    fn append_frames(&mut self, frames: &[(PageNumber, Vec<u8>)], db_size: u32) -> PagerResult<()> {
         let ps = self.index.page_size as usize;
         let [salt1, salt2] = self.index.salt;
         let mut cksum = self.index.cksum;
@@ -363,7 +380,10 @@ impl Wal {
                 self.file.write_all(&data[..ps])?;
             }
 
-            self.index.frames.push(WalFrameMeta { pgno: *pgno, db_size: frame_db_size });
+            self.index.frames.push(WalFrameMeta {
+                pgno: *pgno,
+                db_size: frame_db_size,
+            });
             self.index.mx_frame = frame_no;
             self.index.cksum = cksum;
         }
@@ -381,7 +401,9 @@ impl Wal {
         mode: CheckpointMode,
     ) -> PagerResult<(u32, u32)> {
         let last_commit = self.index.last_commit_frame();
-        if last_commit == 0 { return Ok((0, 0)); }
+        if last_commit == 0 {
+            return Ok((0, 0));
+        }
 
         let ps = page_size as usize;
         let mut copied = 0u32;
@@ -391,7 +413,9 @@ impl Wal {
                 Some(m) => m.clone(),
                 None => break,
             };
-            if meta.pgno == 0 { continue; }
+            if meta.pgno == 0 {
+                continue;
+            }
 
             let data = self.read_frame_data(frame_no)?;
             let off = (meta.pgno as u64 - 1) * ps as u64;
@@ -424,12 +448,12 @@ fn wal_checksum(data: &[u8], init: [u32; 2]) -> [u32; 2] {
     let [mut s1, mut s2] = init;
     let mut i = 0;
     while i + 8 <= data.len() {
-        s1 = s1.wrapping_add(
-            u32::from_be_bytes(data[i..i + 4].try_into().unwrap())
-        ).wrapping_add(s2);
-        s2 = s2.wrapping_add(
-            u32::from_be_bytes(data[i + 4..i + 8].try_into().unwrap())
-        ).wrapping_add(s1);
+        s1 = s1
+            .wrapping_add(u32::from_be_bytes(data[i..i + 4].try_into().unwrap()))
+            .wrapping_add(s2);
+        s2 = s2
+            .wrapping_add(u32::from_be_bytes(data[i + 4..i + 8].try_into().unwrap()))
+            .wrapping_add(s1);
         i += 8;
     }
     [s1, s2]
@@ -470,7 +494,12 @@ impl Pager {
         let file = if read_only {
             File::open(path)?
         } else {
-            OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)?
         };
 
         let file_size = file.metadata()?.len();
@@ -488,7 +517,11 @@ impl Pager {
                     let ps_raw = u16::from_be_bytes([hdr[16], hdr[17]]);
                     let ps: u16 = if ps_raw == 1 { 32768 } else { ps_raw };
                     let ndb = u32::from_be_bytes(hdr[28..32].try_into().unwrap());
-                    let ndb = if ndb == 0 { (file_size / ps as u64) as u32 } else { ndb };
+                    let ndb = if ndb == 0 {
+                        (file_size / ps as u64) as u32
+                    } else {
+                        ndb
+                    };
                     (ps, ndb)
                 } else {
                     let ndb = (file_size / default_page_size as u64) as u32;
@@ -519,19 +552,37 @@ impl Pager {
 
     // ── Accessors ─────────────────────────────────────────────────────────────
 
-    pub fn db_size(&self) -> u32 { self.db_size }
-    pub fn page_size(&self) -> u16 { self.page_size }
-    pub fn state(&self) -> PagerState { self.state }
-    pub fn path(&self) -> &Path { &self.path }
-    pub fn is_read_only(&self) -> bool { self.read_only }
-    pub fn set_cache_size(&mut self, n: usize) { self.cache_size = n; }
-    pub fn is_wal_mode(&self) -> bool { self.wal.is_some() }
+    pub fn db_size(&self) -> u32 {
+        self.db_size
+    }
+    pub fn page_size(&self) -> u16 {
+        self.page_size
+    }
+    pub fn state(&self) -> PagerState {
+        self.state
+    }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+    pub fn set_cache_size(&mut self, n: usize) {
+        self.cache_size = n;
+    }
+    pub fn is_wal_mode(&self) -> bool {
+        self.wal.is_some()
+    }
 
     /// Set a new page size. Only valid on an empty (zero-page) database before
     /// any writes.
     pub fn set_page_size(&mut self, size: u16) -> PagerResult<()> {
-        if self.db_size != 0 { return Err(PagerError::Corrupt); }
-        if !size.is_power_of_two() || size < MIN_PAGE_SIZE { return Err(PagerError::Corrupt); }
+        if self.db_size != 0 {
+            return Err(PagerError::Corrupt);
+        }
+        if !size.is_power_of_two() || size < MIN_PAGE_SIZE {
+            return Err(PagerError::Corrupt);
+        }
         self.page_size = size;
         Ok(())
     }
@@ -541,14 +592,20 @@ impl Pager {
     /// Opens (or creates) the `<db>-wal` file and switches to WAL-mode reads.
     /// Must be called before any write transaction when WAL mode is desired.
     pub fn enable_wal(&mut self) -> PagerResult<()> {
-        if self.read_only { return Err(PagerError::ReadOnly); }
-        if self.wal.is_some() { return Ok(()); }
+        if self.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        if self.wal.is_some() {
+            return Ok(());
+        }
         let wal = Wal::open(&self.path, self.page_size)?;
         // If the WAL has committed frames, update db_size from the last commit.
         if wal.index.last_commit_frame() > 0 {
             let lc = wal.index.last_commit_frame();
             if let Some(meta) = wal.index.frames.get(lc as usize) {
-                if meta.db_size > 0 { self.db_size = meta.db_size; }
+                if meta.db_size > 0 {
+                    self.db_size = meta.db_size;
+                }
             }
         }
         self.wal = Some(wal);
@@ -559,7 +616,9 @@ impl Pager {
 
     /// Acquire a page for **reading**. Loads from disk if not cached.
     pub fn acquire(&mut self, pgno: PageNumber) -> PagerResult<PageRef> {
-        if pgno == 0 { return Err(PagerError::PageOutOfRange(0)); }
+        if pgno == 0 {
+            return Err(PagerError::PageOutOfRange(0));
+        }
         self.ensure_cached(pgno)?;
         Ok(Arc::new(self.cache[&pgno].data.clone()))
     }
@@ -577,7 +636,9 @@ impl Pager {
         if !matches!(self.state, PagerState::Writer | PagerState::WriterLocked) {
             return Err(PagerError::NotInTransaction);
         }
-        if pgno == 0 { return Err(PagerError::PageOutOfRange(0)); }
+        if pgno == 0 {
+            return Err(PagerError::PageOutOfRange(0));
+        }
 
         if pgno <= self.db_size {
             self.ensure_cached(pgno)?;
@@ -596,7 +657,9 @@ impl Pager {
             let p = self.cache.get_mut(&pgno).unwrap();
             p.dirty = true;
             self.dirty_order.push(pgno);
-            if pgno > self.db_size { self.db_size = pgno; }
+            if pgno > self.db_size {
+                self.db_size = pgno;
+            }
         }
 
         Ok(&mut self.cache.get_mut(&pgno).unwrap().data)
@@ -607,7 +670,9 @@ impl Pager {
     /// Begin a write transaction: creates the rollback journal file (or
     /// prepares WAL frames in WAL mode).
     pub fn begin_write(&mut self) -> PagerResult<()> {
-        if self.read_only { return Err(PagerError::ReadOnly); }
+        if self.read_only {
+            return Err(PagerError::ReadOnly);
+        }
         if matches!(self.state, PagerState::Writer | PagerState::WriterLocked) {
             return Ok(());
         }
@@ -616,7 +681,10 @@ impl Pager {
             // Rollback-journal mode.
             let jpath = journal_path(&self.path);
             let mut jfile = OpenOptions::new()
-                .read(true).write(true).create(true).truncate(true)
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
                 .open(&jpath)?;
 
             let nonce = random_u32();
@@ -624,17 +692,20 @@ impl Pager {
 
             let mut hdr = [0u8; 28];
             hdr[0..8].copy_from_slice(&JOURNAL_MAGIC);
-            hdr[8..12].copy_from_slice(&u32::MAX.to_be_bytes());          // n_records = unknown
+            hdr[8..12].copy_from_slice(&u32::MAX.to_be_bytes()); // n_records = unknown
             hdr[12..16].copy_from_slice(&nonce.to_be_bytes());
             hdr[16..20].copy_from_slice(&db_size.to_be_bytes());
-            hdr[20..24].copy_from_slice(&512u32.to_be_bytes());           // sector size
+            hdr[20..24].copy_from_slice(&512u32.to_be_bytes()); // sector size
             hdr[24..28].copy_from_slice(&(self.page_size as u32).to_be_bytes());
             jfile.write_all(&hdr)?;
             jfile.flush()?;
 
             self.journal = Some(RollbackJournal {
-                file: jfile, path: jpath, nonce,
-                n_records: 0, db_size_at_start: db_size,
+                file: jfile,
+                path: jpath,
+                nonce,
+                n_records: 0,
+                db_size_at_start: db_size,
             });
         }
         // In WAL mode we don't need a rollback journal.
@@ -702,7 +773,9 @@ impl Pager {
                 let _ = std::fs::remove_file(&j.path);
             }
         }
-        for p in self.cache.values_mut() { p.dirty = false; }
+        for p in self.cache.values_mut() {
+            p.dirty = false;
+        }
         self.dirty_order.clear();
         self.savepoints.clear();
         self.state = PagerState::Reader;
@@ -743,7 +816,9 @@ impl Pager {
 
     /// Snapshot current dirty-page contents as savepoint `n`.
     pub fn open_savepoint(&mut self, _n: usize) -> PagerResult<()> {
-        let dirty_pages: HashMap<PageNumber, Vec<u8>> = self.dirty_order.iter()
+        let dirty_pages: HashMap<PageNumber, Vec<u8>> = self
+            .dirty_order
+            .iter()
             .filter_map(|&pgno| self.cache.get(&pgno).map(|p| (pgno, p.data.clone())))
             .collect();
         self.savepoints.push(Savepoint {
@@ -786,7 +861,9 @@ impl Pager {
 
     /// Merge savepoint `n` into the outer transaction.
     pub fn savepoint_release(&mut self, n: usize) -> PagerResult<()> {
-        if n < self.savepoints.len() { self.savepoints.truncate(n); }
+        if n < self.savepoints.len() {
+            self.savepoints.truncate(n);
+        }
         Ok(())
     }
 
@@ -816,7 +893,9 @@ impl Pager {
         if !matches!(self.state, PagerState::Writer | PagerState::WriterLocked) {
             return Err(PagerError::NotInTransaction);
         }
-        if new_pgno == 0 { return Err(PagerError::PageOutOfRange(0)); }
+        if new_pgno == 0 {
+            return Err(PagerError::PageOutOfRange(0));
+        }
 
         let data = (*page).clone();
 
@@ -830,14 +909,18 @@ impl Pager {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     fn ensure_cached(&mut self, pgno: PageNumber) -> PagerResult<()> {
-        if self.cache.contains_key(&pgno) { return Ok(()); }
+        if self.cache.contains_key(&pgno) {
+            return Ok(());
+        }
 
         // In WAL mode, check the WAL first.
         if let Some(wal) = &mut self.wal {
             if let Some(frame_no) = wal.index.find_latest_frame(pgno) {
                 let data = wal.read_frame_data(frame_no)?;
                 self.cache.insert(pgno, CachedPage { data, dirty: false });
-                if self.cache.len() > self.cache_size { self.evict_clean(pgno); }
+                if self.cache.len() > self.cache_size {
+                    self.evict_clean(pgno);
+                }
                 return Ok(());
             }
         }
@@ -855,16 +938,22 @@ impl Pager {
         }
 
         self.cache.insert(pgno, CachedPage { data, dirty: false });
-        if self.cache.len() > self.cache_size { self.evict_clean(pgno); }
+        if self.cache.len() > self.cache_size {
+            self.evict_clean(pgno);
+        }
         Ok(())
     }
 
     fn journal_page(&mut self, pgno: PageNumber) -> PagerResult<()> {
-        let data = self.cache.get(&pgno)
+        let data = self
+            .cache
+            .get(&pgno)
             .map(|p| p.data.clone())
             .unwrap_or_else(|| vec![0u8; self.page_size as usize]);
 
-        let Some(j) = &mut self.journal else { return Ok(()); };
+        let Some(j) = &mut self.journal else {
+            return Ok(());
+        };
         let nonce = j.nonce;
         let cksum = journal_checksum(nonce, &data);
 
@@ -886,7 +975,11 @@ impl Pager {
             vec![]
         };
 
-        let saved_db_size = self.journal.as_ref().map(|j| j.db_size_at_start).unwrap_or(0);
+        let saved_db_size = self
+            .journal
+            .as_ref()
+            .map(|j| j.db_size_at_start)
+            .unwrap_or(0);
 
         let fps = self.page_size as u64;
         for (pgno, orig) in &records {
@@ -910,7 +1003,9 @@ impl Pager {
     }
 
     fn update_db_header(&mut self) -> PagerResult<()> {
-        if self.db_size < 1 { return Ok(()); }
+        if self.db_size < 1 {
+            return Ok(());
+        }
         self.ensure_cached(1)?;
         if let Some(p) = self.cache.get_mut(&1) {
             if p.data.len() >= 100 && &p.data[0..16] == DB_MAGIC {
@@ -927,7 +1022,9 @@ impl Pager {
     }
 
     fn evict_clean(&mut self, keep: PageNumber) {
-        if let Some(v) = self.cache.iter()
+        if let Some(v) = self
+            .cache
+            .iter()
             .find(|(&pgno, p)| pgno != keep && !p.dirty)
             .map(|(&pgno, _)| pgno)
         {
@@ -941,7 +1038,10 @@ impl Pager {
 fn journal_checksum(nonce: u32, data: &[u8]) -> u32 {
     let mut c = nonce;
     let mut i = data.len() as isize - 200;
-    while i > 0 { c = c.wrapping_add(data[i as usize] as u32); i -= 200; }
+    while i > 0 {
+        c = c.wrapping_add(data[i as usize] as u32);
+        i -= 200;
+    }
     c
 }
 
@@ -1135,8 +1235,11 @@ mod tests {
         // Re-open WITHOUT WAL: should read the checkpointed data from the main db.
         let mut p2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
         for pgno in 1u32..=5 {
-            assert_eq!(p2.acquire(pgno).unwrap()[0], (pgno * 10) as u8,
-                       "page {pgno} mismatch after checkpoint");
+            assert_eq!(
+                p2.acquire(pgno).unwrap()[0],
+                (pgno * 10) as u8,
+                "page {pgno} mismatch after checkpoint"
+            );
         }
     }
 
@@ -1187,7 +1290,10 @@ mod tests {
         // The WAL file should now be header-only (32 bytes).
         let wal_path_buf = wal_path(f.path());
         let wal_len = std::fs::metadata(&wal_path_buf).unwrap().len();
-        assert_eq!(wal_len, WAL_HDR_SIZE, "WAL should be truncated to header only");
+        assert_eq!(
+            wal_len, WAL_HDR_SIZE,
+            "WAL should be truncated to header only"
+        );
 
         // Data should still be readable from the main db file.
         let mut p2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
@@ -1252,7 +1358,10 @@ mod tests {
         // Re-open: the pager should detect and replay the journal.
         // For now, verify the journal file exists and the db is openable.
         let jpath = journal_path(f.path());
-        assert!(jpath.exists(), "journal should still exist after simulated crash");
+        assert!(
+            jpath.exists(),
+            "journal should still exist after simulated crash"
+        );
 
         // A real recovery would replay the journal on open; this test validates
         // that apply_rollback works by manually triggering it.
@@ -1260,7 +1369,11 @@ mod tests {
         // Manually replay journal (in production, Pager::open would do this).
         if jpath.exists() {
             p2.journal = Some(RollbackJournal {
-                file: OpenOptions::new().read(true).write(true).open(&jpath).unwrap(),
+                file: OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&jpath)
+                    .unwrap(),
                 path: jpath.clone(),
                 nonce: 0,
                 n_records: 0,
@@ -1270,6 +1383,10 @@ mod tests {
             p2.apply_rollback(JOURNAL_HEADER_SIZE).unwrap();
         }
         let page = p2.acquire(1).unwrap();
-        assert_eq!(&page[0..4], b"SAFE", "journal recovery should restore pre-crash data");
+        assert_eq!(
+            &page[0..4],
+            b"SAFE",
+            "journal recovery should restore pre-crash data"
+        );
     }
 }

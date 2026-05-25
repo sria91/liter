@@ -3,8 +3,8 @@
 //! Mirrors `global.c` and `config.c`. Provides a thread-safe singleton that
 //! holds library-wide settings, mirroring `liter_config()`.
 
-use std::sync::OnceLock;
 use parking_lot::RwLock;
+use std::sync::OnceLock;
 
 /// Thread-safety mode, mirroring SQLITE_THREADSAFE values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

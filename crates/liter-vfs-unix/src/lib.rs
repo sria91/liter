@@ -336,6 +336,8 @@ mod tests {
     fn sector_size_and_characteristics() {
         let (_tmp, f) = open_file();
         assert_eq!(f.sector_size(), 4096);
-        assert!(f.device_characteristics().contains(DeviceCharacteristics::SAFE_APPEND));
+        assert!(f
+            .device_characteristics()
+            .contains(DeviceCharacteristics::SAFE_APPEND));
     }
 }

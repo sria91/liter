@@ -18,16 +18,36 @@ pub enum Stmt {
     Alter(Box<AlterStmt>),
     Begin(TransactionKind),
     Commit,
-    Rollback { savepoint: Option<String> },
+    Rollback {
+        savepoint: Option<String>,
+    },
     Savepoint(String),
     Release(String),
-    Attach { expr: Expr, name: String, key: Option<Expr> },
+    Attach {
+        expr: Expr,
+        name: String,
+        key: Option<Expr>,
+    },
     Detach(String),
-    Pragma { schema: Option<String>, name: String, value: Option<PragmaValue> },
-    Vacuum { schema: Option<String>, into: Option<Expr> },
-    Reindex { target: Option<String> },
-    Analyze { target: Option<String> },
-    Explain { query_plan: bool, stmt: Box<Stmt> },
+    Pragma {
+        schema: Option<String>,
+        name: String,
+        value: Option<PragmaValue>,
+    },
+    Vacuum {
+        schema: Option<String>,
+        into: Option<Expr>,
+    },
+    Reindex {
+        target: Option<String>,
+    },
+    Analyze {
+        target: Option<String>,
+    },
+    Explain {
+        query_plan: bool,
+        stmt: Box<Stmt>,
+    },
 }
 
 /// SELECT statement.
@@ -65,7 +85,10 @@ pub struct SimpleSelect {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DistinctKind { All, Distinct }
+pub enum DistinctKind {
+    All,
+    Distinct,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResultColumn {
@@ -82,9 +105,22 @@ pub struct FromClause {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableOrSubquery {
-    Table { schema: Option<String>, name: String, alias: Option<String>, indexed: IndexedKind },
-    Subquery { select: Box<SelectStmt>, alias: Option<String> },
-    TableFunction { schema: Option<String>, name: String, args: Vec<Expr>, alias: Option<String> },
+    Table {
+        schema: Option<String>,
+        name: String,
+        alias: Option<String>,
+        indexed: IndexedKind,
+    },
+    Subquery {
+        select: Box<SelectStmt>,
+        alias: Option<String>,
+    },
+    TableFunction {
+        schema: Option<String>,
+        name: String,
+        args: Vec<Expr>,
+        alias: Option<String>,
+    },
     Joined(Box<JoinClause>),
 }
 
@@ -130,10 +166,17 @@ pub struct OrderingTerm {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortDirection { Asc, Desc }
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NullsOrder { First, Last, Default }
+pub enum NullsOrder {
+    First,
+    Last,
+    Default,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LimitClause {
@@ -142,7 +185,12 @@ pub struct LimitClause {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompoundOp { Union, UnionAll, Intersect, Except }
+pub enum CompoundOp {
+    Union,
+    UnionAll,
+    Intersect,
+    Except,
+}
 
 /// INSERT statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -213,7 +261,10 @@ pub struct CreateTable {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CreateTableBody {
-    Columns { columns: Vec<ColumnDef>, constraints: Vec<TableConstraint> },
+    Columns {
+        columns: Vec<ColumnDef>,
+        constraints: Vec<TableConstraint>,
+    },
     As(Box<SelectStmt>),
 }
 
@@ -238,14 +289,25 @@ pub struct TypeName {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnConstraint {
-    PrimaryKey { direction: Option<SortDirection>, conflict: Option<ConflictAction>, autoincrement: bool },
-    NotNull { conflict: Option<ConflictAction> },
-    Unique { conflict: Option<ConflictAction> },
+    PrimaryKey {
+        direction: Option<SortDirection>,
+        conflict: Option<ConflictAction>,
+        autoincrement: bool,
+    },
+    NotNull {
+        conflict: Option<ConflictAction>,
+    },
+    Unique {
+        conflict: Option<ConflictAction>,
+    },
     Check(Expr),
     Default(DefaultValue),
     Collate(String),
     References(ForeignKeyClause),
-    Generated { expr: Expr, stored: bool },
+    Generated {
+        expr: Expr,
+        stored: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -262,10 +324,19 @@ pub struct TableConstraint {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableConstraintKind {
-    PrimaryKey { columns: Vec<IndexedColumn>, conflict: Option<ConflictAction> },
-    Unique { columns: Vec<IndexedColumn>, conflict: Option<ConflictAction> },
+    PrimaryKey {
+        columns: Vec<IndexedColumn>,
+        conflict: Option<ConflictAction>,
+    },
+    Unique {
+        columns: Vec<IndexedColumn>,
+        conflict: Option<ConflictAction>,
+    },
     Check(Expr),
-    ForeignKey { columns: Vec<String>, clause: ForeignKeyClause },
+    ForeignKey {
+        columns: Vec<String>,
+        clause: ForeignKeyClause,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -291,10 +362,21 @@ pub enum ForeignKeyAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReferentialAction { SetNull, SetDefault, Cascade, Restrict, NoAction }
+pub enum ReferentialAction {
+    SetNull,
+    SetDefault,
+    Cascade,
+    Restrict,
+    NoAction,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeferrableKind { Deferrable, NotDeferrable, InitiallyDeferred, InitiallyImmediate }
+pub enum DeferrableKind {
+    Deferrable,
+    NotDeferrable,
+    InitiallyDeferred,
+    InitiallyImmediate,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateIndex {
@@ -332,7 +414,11 @@ pub struct CreateTrigger {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TriggerTime { Before, After, InsteadOf }
+pub enum TriggerTime {
+    Before,
+    After,
+    InsteadOf,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TriggerEvent {
@@ -369,7 +455,12 @@ pub struct DropStmt {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DropKind { Table, Index, View, Trigger }
+pub enum DropKind {
+    Table,
+    Index,
+    View,
+    Trigger,
+}
 
 /// ALTER TABLE statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -392,22 +483,77 @@ pub enum AlterAction {
 pub enum Expr {
     Literal(LiteralValue),
     Bind(BindParam),
-    Column { schema: Option<String>, table: Option<String>, name: String },
-    Unary { op: UnaryOp, operand: Box<Expr> },
-    Binary { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
-    Function { schema: Option<String>, name: String, args: FunctionArgs, filter: Option<Box<Expr>>, over: Option<WindowSpec> },
-    Cast { expr: Box<Expr>, type_name: TypeName },
-    Collate { expr: Box<Expr>, collation: String },
-    Like { not: bool, op: LikeOp, lhs: Box<Expr>, rhs: Box<Expr>, escape: Option<Box<Expr>> },
-    IsNull { not: bool, expr: Box<Expr> },
-    Is { not: bool, lhs: Box<Expr>, rhs: Box<Expr> },
-    Between { not: bool, expr: Box<Expr>, low: Box<Expr>, high: Box<Expr> },
-    In { not: bool, expr: Box<Expr>, rhs: InRhs },
-    Exists { not: bool, select: Box<SelectStmt> },
-    Case { base: Option<Box<Expr>>, arms: Vec<CaseArm>, else_: Option<Box<Expr>> },
+    Column {
+        schema: Option<String>,
+        table: Option<String>,
+        name: String,
+    },
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expr>,
+    },
+    Binary {
+        op: BinaryOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Function {
+        schema: Option<String>,
+        name: String,
+        args: FunctionArgs,
+        filter: Option<Box<Expr>>,
+        over: Option<WindowSpec>,
+    },
+    Cast {
+        expr: Box<Expr>,
+        type_name: TypeName,
+    },
+    Collate {
+        expr: Box<Expr>,
+        collation: String,
+    },
+    Like {
+        not: bool,
+        op: LikeOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        escape: Option<Box<Expr>>,
+    },
+    IsNull {
+        not: bool,
+        expr: Box<Expr>,
+    },
+    Is {
+        not: bool,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    Between {
+        not: bool,
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+    },
+    In {
+        not: bool,
+        expr: Box<Expr>,
+        rhs: InRhs,
+    },
+    Exists {
+        not: bool,
+        select: Box<SelectStmt>,
+    },
+    Case {
+        base: Option<Box<Expr>>,
+        arms: Vec<CaseArm>,
+        else_: Option<Box<Expr>>,
+    },
     RowValue(Vec<Expr>),
     Subquery(Box<SelectStmt>),
-    Raise { kind: RaiseKind, message: Option<Box<Expr>> },
+    Raise {
+        kind: RaiseKind,
+        message: Option<Box<Expr>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -432,22 +578,48 @@ pub enum BindParam {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnaryOp { Minus, Plus, BitNot, Not }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinaryOp {
-    Add, Sub, Mul, Div, Mod,
-    BitAnd, BitOr, LShift, RShift,
-    Concat,
-    Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or,
-    Is, IsNot,
-    In, NotIn,
-    JsonExtract, JsonExtractDeep,
+pub enum UnaryOp {
+    Minus,
+    Plus,
+    BitNot,
+    Not,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LikeOp { Like, Glob, Regexp, Match }
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    BitAnd,
+    BitOr,
+    LShift,
+    RShift,
+    Concat,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    Is,
+    IsNot,
+    In,
+    NotIn,
+    JsonExtract,
+    JsonExtractDeep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LikeOp {
+    Like,
+    Glob,
+    Regexp,
+    Match,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FunctionArgs {
@@ -461,18 +633,36 @@ pub enum FunctionArgs {
 pub enum InRhs {
     Subquery(Box<SelectStmt>),
     List(Vec<Expr>),
-    Table { schema: Option<String>, name: String },
-    TableFunction { schema: Option<String>, name: String, args: Vec<Expr> },
+    Table {
+        schema: Option<String>,
+        name: String,
+    },
+    TableFunction {
+        schema: Option<String>,
+        name: String,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CaseArm { pub when: Expr, pub then: Expr }
+pub struct CaseArm {
+    pub when: Expr,
+    pub then: Expr,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RaiseKind { Ignore, Rollback, Abort, Fail }
+pub enum RaiseKind {
+    Ignore,
+    Rollback,
+    Abort,
+    Fail,
+}
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WindowDef { pub name: String, pub spec: WindowSpec }
+pub struct WindowDef {
+    pub name: String,
+    pub spec: WindowSpec,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowSpec {
@@ -491,7 +681,11 @@ pub struct WindowFrame {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameKind { Range, Rows, Groups }
+pub enum FrameKind {
+    Range,
+    Rows,
+    Groups,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameBound {
@@ -503,7 +697,12 @@ pub enum FrameBound {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameExclude { NoOthers, CurrentRow, Group, Ties }
+pub enum FrameExclude {
+    NoOthers,
+    CurrentRow,
+    Group,
+    Ties,
+}
 
 /// WITH (CTE) clause.
 #[derive(Debug, Clone, PartialEq)]
@@ -521,10 +720,20 @@ pub struct CommonTableExpr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConflictAction { Rollback, Abort, Fail, Ignore, Replace }
+pub enum ConflictAction {
+    Rollback,
+    Abort,
+    Fail,
+    Ignore,
+    Replace,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransactionKind { Deferred, Immediate, Exclusive }
+pub enum TransactionKind {
+    Deferred,
+    Immediate,
+    Exclusive,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QualifiedTable {

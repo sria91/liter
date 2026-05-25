@@ -28,7 +28,10 @@ pub enum ScanKind {
     /// Full sequential scan.
     FullScan,
     /// Index scan using the named index.
-    IndexScan { index: String, constraints: Vec<String> },
+    IndexScan {
+        index: String,
+        constraints: Vec<String>,
+    },
     /// Row-id lookup (single row).
     RowIdLookup,
 }
@@ -137,7 +140,10 @@ impl<'a> Optimizer<'a> {
 
     fn extract_constraints(&self, expr: &Expr, target_table: &str, constraints: &mut Vec<String>) {
         if let Expr::Binary { op, left, right } = expr {
-            if matches!(op, BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le) {
+            if matches!(
+                op,
+                BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le
+            ) {
                 if let Expr::Column { table, name, .. } = &**left {
                     if table.is_none() || table.as_deref() == Some(target_table) {
                         constraints.push(name.clone());

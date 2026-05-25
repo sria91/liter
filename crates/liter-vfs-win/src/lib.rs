@@ -15,17 +15,19 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use liter_vfs::{AccessFlags, DeviceCharacteristics, LockLevel, OpenFlags, SyncFlags, Vfs, VfsFile};
+use liter_vfs::{
+    AccessFlags, DeviceCharacteristics, LockLevel, OpenFlags, SyncFlags, Vfs, VfsFile,
+};
 
 /// SQLite lock-byte region offsets (must match C SQLite exactly).
 #[allow(dead_code)]
-const PENDING_BYTE: u64  = 0x40000000;
+const PENDING_BYTE: u64 = 0x40000000;
 #[allow(dead_code)]
 const RESERVED_BYTE: u64 = PENDING_BYTE + 1;
 #[allow(dead_code)]
-const SHARED_FIRST: u64  = PENDING_BYTE + 2;
+const SHARED_FIRST: u64 = PENDING_BYTE + 2;
 #[allow(dead_code)]
-const SHARED_SIZE: u64   = 510;
+const SHARED_SIZE: u64 = 510;
 
 pub struct WinFile {
     file: File,
@@ -56,14 +58,18 @@ impl VfsFile for WinFile {
     }
 
     fn lock(&mut self, level: LockLevel) -> io::Result<()> {
-        if level <= self.lock { return Ok(()); }
+        if level <= self.lock {
+            return Ok(());
+        }
         platform::acquire_lock(&self.file, level, self.lock)?;
         self.lock = level;
         Ok(())
     }
 
     fn unlock(&mut self, level: LockLevel) -> io::Result<()> {
-        if level >= self.lock { return Ok(()); }
+        if level >= self.lock {
+            return Ok(());
+        }
         platform::release_lock(&self.file, level, self.lock)?;
         self.lock = level;
         Ok(())
@@ -90,8 +96,7 @@ mod platform {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{BOOL, HANDLE};
     use windows::Win32::Storage::FileSystem::{
-        LockFileEx, UnlockFile,
-        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+        LockFileEx, UnlockFile, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
     };
     use windows::Win32::System::IO::OVERLAPPED;
 
@@ -107,13 +112,29 @@ mod platform {
 
     fn lock_range(handle: HANDLE, offset: u64, length: u64, exclusive: bool) -> io::Result<()> {
         let flags = LOCKFILE_FAIL_IMMEDIATELY
-            | if exclusive { LOCKFILE_EXCLUSIVE_LOCK } else { windows::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK ^ windows::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK };
+            | if exclusive {
+                LOCKFILE_EXCLUSIVE_LOCK
+            } else {
+                windows::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK
+                    ^ windows::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK
+            };
         let mut ov = make_overlapped(offset);
         // SAFETY: handle is a valid, open Windows file handle.
         let result = unsafe {
-            LockFileEx(handle, flags, 0, length as u32, (length >> 32) as u32, &mut ov)
+            LockFileEx(
+                handle,
+                flags,
+                0,
+                length as u32,
+                (length >> 32) as u32,
+                &mut ov,
+            )
         };
-        if result.is_ok() { Ok(()) } else { Err(io::Error::last_os_error()) }
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 
     fn shared_lock_range(handle: HANDLE, offset: u64, length: u64) -> io::Result<()> {
@@ -121,9 +142,20 @@ mod platform {
         // Shared: no LOCKFILE_EXCLUSIVE_LOCK flag, no LOCKFILE_FAIL_IMMEDIATELY.
         // SAFETY: handle is valid.
         let result = unsafe {
-            LockFileEx(handle, LOCKFILE_FAIL_IMMEDIATELY, 0, length as u32, (length >> 32) as u32, &mut ov)
+            LockFileEx(
+                handle,
+                LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                length as u32,
+                (length >> 32) as u32,
+                &mut ov,
+            )
         };
-        if result.is_ok() { Ok(()) } else { Err(io::Error::last_os_error()) }
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 
     fn exclusive_lock_range(handle: HANDLE, offset: u64, length: u64) -> io::Result<()> {
@@ -139,15 +171,29 @@ mod platform {
                 &mut ov,
             )
         };
-        if result.is_ok() { Ok(()) } else { Err(io::Error::last_os_error()) }
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 
     fn unlock_range(handle: HANDLE, offset: u64, length: u64) -> io::Result<()> {
         // SAFETY: handle is valid.
         let result = unsafe {
-            UnlockFile(handle, offset as u32, (offset >> 32) as u32, length as u32, (length >> 32) as u32)
+            UnlockFile(
+                handle,
+                offset as u32,
+                (offset >> 32) as u32,
+                length as u32,
+                (length >> 32) as u32,
+            )
         };
-        if result.is_ok() { Ok(()) } else { Err(io::Error::last_os_error()) }
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 
     pub fn acquire_lock(file: &File, target: LockLevel, current: LockLevel) -> io::Result<()> {
@@ -246,7 +292,10 @@ impl Vfs for WinVfs {
             .write(!flags.contains(OpenFlags::READ_ONLY))
             .create(flags.contains(OpenFlags::CREATE))
             .open(path)?;
-        Ok(WinFile { file, lock: LockLevel::None })
+        Ok(WinFile {
+            file,
+            lock: LockLevel::None,
+        })
     }
 
     fn delete(&self, path: &Path, _sync_dir: bool) -> io::Result<()> {
