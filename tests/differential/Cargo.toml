@@ -4,10 +4,6 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-[features]
-# Enable differential testing against C SQLite (requires libsqlite3 installed).
-differential = ["rusqlite"]
-
 [dependencies]
 liter = { path = "../../crates/liter" }
-rusqlite = { workspace = true, optional = true }
+rusqlite = { workspace = true }

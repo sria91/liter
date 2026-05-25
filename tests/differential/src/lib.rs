@@ -12,7 +12,6 @@ use liter::{Connection as RConn, Value};
 ///
 /// # Panics
 /// Panics if the results differ or if the C SQLite call fails.
-#[cfg(feature = "differential")]
 pub fn diff_exec(setup_sql: &[&str], sql: &str) {
     use rusqlite::Connection as CConn;
 
