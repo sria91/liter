@@ -33,4 +33,4 @@ jobs:
       run: cargo test --all-targets
       
     - name: Run Differential Tests
-      run: cargo test -p differential --features differential
+      run: cargo test -p differential
