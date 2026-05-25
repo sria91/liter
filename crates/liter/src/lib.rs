@@ -541,7 +541,7 @@ mod tests {
     fn test_execute_simple_select() {
         let conn = Connection::open_in_memory().unwrap();
         let rows = conn.query("SELECT 1 + 1;", [] as [(); 0]).unwrap();
-        
+
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 1);
         assert_eq!(rows[0][0], Value::Int(2));
@@ -550,7 +550,9 @@ mod tests {
     #[test]
     fn test_execute_multiple_columns() {
         let conn = Connection::open_in_memory().unwrap();
-        let rows = conn.query("SELECT 42, 'hello', 3.5;", [] as [(); 0]).unwrap();
+        let rows = conn
+            .query("SELECT 42, 'hello', 3.5;", [] as [(); 0])
+            .unwrap();
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 3);
