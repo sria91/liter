@@ -290,7 +290,11 @@ impl Connection {
             eprintln!("{:04} {:?}", i, op);
         }
         vm.func_dispatcher = Some(|name, args| {
-            sqlite3_functions::dispatch_function(name, args).map_err(|e| e.to_string())
+            if name.to_ascii_lowercase().starts_with("json") || name == "->" || name == "->>" {
+                sqlite3_json::dispatch_function(name, args)
+            } else {
+                sqlite3_functions::dispatch_function(name, args).map_err(|e| e.to_string())
+            }
         });
         vm.agg_dispatcher = Some(|name| {
             sqlite3_functions::dispatch_aggregate(name)

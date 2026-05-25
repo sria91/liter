@@ -9,3 +9,4 @@ license.workspace = true
 sqlite3-vdbe = { path = "../sqlite3-vdbe" }
 sqlite3-record = { path = "../sqlite3-record" }
 thiserror.workspace = true
+chrono = "0.4.44"

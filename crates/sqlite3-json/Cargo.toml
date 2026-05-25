@@ -7,6 +7,5 @@ license.workspace = true
 
 [dependencies]
 serde_json = "1.0.150"
-sqlite3 = { path = "../sqlite3" }
 sqlite3-vdbe = { version = "0.1.0", path = "../sqlite3-vdbe" }
 thiserror.workspace = true

@@ -23,6 +23,7 @@ sqlite3-vdbe = { path = "../sqlite3-vdbe" }
 sqlite3-functions = { path = "../sqlite3-functions" }
 thiserror.workspace = true
 parking_lot.workspace = true
+sqlite3-json = { version = "0.1.0", path = "../sqlite3-json" }
 
 [features]
 default = []
