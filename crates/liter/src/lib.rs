@@ -226,7 +226,7 @@ impl Connection {
         vm.func_dispatcher = Some(|name, args| {
             liter_functions::dispatch_function(name, args).map_err(|e| e.to_string())
         });
-        vm.agg_dispatcher = Some(|name| liter_functions::dispatch_aggregate(name));
+        vm.agg_dispatcher = Some(liter_functions::dispatch_aggregate);
 
         // Only auto-begin/commit when NOT inside a user transaction.
         let auto_txn = !self.in_txn.get();
@@ -309,7 +309,7 @@ impl Connection {
                 liter_functions::dispatch_function(name, args).map_err(|e| e.to_string())
             }
         });
-        vm.agg_dispatcher = Some(|name| liter_functions::dispatch_aggregate(name));
+        vm.agg_dispatcher = Some(liter_functions::dispatch_aggregate);
 
         let mut cursors: Vec<Option<liter_vdbe::VdbeCursor>> = Vec::with_capacity(vm.n_cursors);
         for _ in 0..vm.n_cursors {
@@ -541,7 +541,7 @@ mod tests {
     fn test_execute_simple_select() {
         let conn = Connection::open_in_memory().unwrap();
         let rows = conn.query("SELECT 1 + 1;", [] as [(); 0]).unwrap();
-
+        
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 1);
         assert_eq!(rows[0][0], Value::Int(2));
@@ -550,15 +550,13 @@ mod tests {
     #[test]
     fn test_execute_multiple_columns() {
         let conn = Connection::open_in_memory().unwrap();
-        let rows = conn
-            .query("SELECT 42, 'hello', 3.14;", [] as [(); 0])
-            .unwrap();
+        let rows = conn.query("SELECT 42, 'hello', 3.5;", [] as [(); 0]).unwrap();
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 3);
         assert_eq!(rows[0][0], Value::Int(42));
         assert_eq!(rows[0][1], Value::Text(b"hello".to_vec()));
-        assert_eq!(rows[0][2], Value::Real(3.14));
+        assert_eq!(rows[0][2], Value::Real(3.5));
     }
 
     #[test]
