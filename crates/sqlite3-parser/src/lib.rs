@@ -184,6 +184,22 @@ impl<'a> Parser<'a> {
             where_ = Some(self.parse_expr()?);
         }
 
+        let mut group_by = vec![];
+        if self.consume_if(Token::Group)? {
+            self.expect(Token::By)?;
+            loop {
+                group_by.push(self.parse_expr()?);
+                if !self.consume_if(Token::Comma)? {
+                    break;
+                }
+            }
+        }
+
+        let mut having = None;
+        if self.consume_if(Token::Having)? {
+            having = Some(self.parse_expr()?);
+        }
+
         let mut order_by = vec![];
         if self.consume_if(Token::Order)? {
             self.expect(Token::By)?;
@@ -248,8 +264,8 @@ impl<'a> Parser<'a> {
                 result_columns,
                 from,
                 where_,
-                group_by: vec![],
-                having: None,
+                group_by,
+                having,
                 window: vec![],
             }),
             order_by,
@@ -478,6 +494,10 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> ParseResult<Expr> {
         let tok = self.peek()?.cloned();
         match tok {
+            Some(Token::Null) => {
+                self.consume()?;
+                Ok(Expr::Literal(LiteralValue::Null))
+            }
             Some(Token::Integer(s)) => {
                 self.consume()?;
                 Ok(Expr::Literal(LiteralValue::Integer(s.parse().unwrap_or(0))))

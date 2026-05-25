@@ -164,6 +164,9 @@ impl Connection {
         vm.func_dispatcher = Some(|name, args| {
             sqlite3_functions::dispatch_function(name, args).map_err(|e| e.to_string())
         });
+        vm.agg_dispatcher = Some(|name| {
+            sqlite3_functions::dispatch_aggregate(name)
+        });
 
         // Only auto-begin/commit when NOT inside a user transaction.
         let auto_txn = !self.in_txn.get();
@@ -234,8 +237,15 @@ impl Connection {
         let mut results = Vec::new();
 
         let mut vm = sqlite3_codegen::compile_with_schema(&ast, &self.schema)?;
+        eprintln!("VDBE ops for sql '{}':", sql);
+        for (i, op) in vm.ops.iter().enumerate() {
+            eprintln!("{:04} {:?}", i, op);
+        }
         vm.func_dispatcher = Some(|name, args| {
             sqlite3_functions::dispatch_function(name, args).map_err(|e| e.to_string())
+        });
+        vm.agg_dispatcher = Some(|name| {
+            sqlite3_functions::dispatch_aggregate(name)
         });
 
         let mut cursors: Vec<Option<sqlite3_vdbe::VdbeCursor>> = Vec::with_capacity(vm.n_cursors);
@@ -283,6 +293,10 @@ impl Connection {
     pub fn prepare<'c>(&'c self, sql: &str) -> SqliteResult<Statement<'c>> {
         let ast = sqlite3_parser::parse_stmt(sql)?;
         let vm = sqlite3_codegen::compile_with_schema(&ast, &self.schema)?;
+        eprintln!("VDBE ops for sql '{}':", sql);
+        for (i, op) in vm.ops.iter().enumerate() {
+            eprintln!("{:04} {:?}", i, op);
+        }
         let n = vm.n_cursors;
         Ok(Statement {
             conn: self,
@@ -307,6 +321,7 @@ fn mem_to_value(mem: &sqlite3_vdbe::Mem) -> Value {
         sqlite3_vdbe::Mem::Text(t) => Value::Text(t.as_bytes().to_vec()),
         sqlite3_vdbe::Mem::Blob(b) => Value::Blob(b.to_vec()),
         sqlite3_vdbe::Mem::ZeroBlob(n) => Value::Blob(vec![0; *n as usize]),
+        sqlite3_vdbe::Mem::Agg(_) => Value::Null, // Should not leak out to results, but just in case
     }
 }
 

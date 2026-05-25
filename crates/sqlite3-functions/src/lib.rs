@@ -19,6 +19,129 @@ pub enum FuncError {
 
 pub type FuncResult<T> = Result<T, FuncError>;
 
+// ── Aggregate functions ───────────────────────────────────────────────────────
+
+pub fn dispatch_aggregate(name: &str) -> Result<Box<dyn sqlite3_vdbe::AggregateState>, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "count" => Ok(Box::new(CountState { count: 0 })),
+        "sum" => Ok(Box::new(SumState { sum: None })),
+        "avg" => Ok(Box::new(AvgState { sum: 0.0, count: 0 })),
+        "min" => Ok(Box::new(MinState { min: None })),
+        "max" => Ok(Box::new(MaxState { max: None })),
+        _ => Err(format!("Not implemented: aggregate {}()", name)),
+    }
+}
+
+#[derive(Debug)]
+struct CountState {
+    count: i64,
+}
+impl sqlite3_vdbe::AggregateState for CountState {
+    fn step(&mut self, args: &[Mem]) -> Result<(), String> {
+        if args.is_empty() || !args[0].is_null() {
+            self.count += 1;
+        }
+        Ok(())
+    }
+    fn finalize(&mut self) -> Result<Mem, String> {
+        Ok(Mem::Int(self.count))
+    }
+}
+
+#[derive(Debug)]
+struct SumState {
+    sum: Option<f64>,
+}
+impl sqlite3_vdbe::AggregateState for SumState {
+    fn step(&mut self, args: &[Mem]) -> Result<(), String> {
+        if let Some(val) = args.first() {
+            if let Some(num) = val.to_real() {
+                self.sum = Some(self.sum.unwrap_or(0.0) + num);
+            }
+        }
+        Ok(())
+    }
+    fn finalize(&mut self) -> Result<Mem, String> {
+        if let Some(s) = self.sum {
+            Ok(Mem::Real(s))
+        } else {
+            Ok(Mem::Null)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AvgState {
+    sum: f64,
+    count: i64,
+}
+impl sqlite3_vdbe::AggregateState for AvgState {
+    fn step(&mut self, args: &[Mem]) -> Result<(), String> {
+        if let Some(val) = args.first() {
+            if let Some(num) = val.to_real() {
+                self.sum += num;
+                self.count += 1;
+            }
+        }
+        Ok(())
+    }
+    fn finalize(&mut self) -> Result<Mem, String> {
+        if self.count == 0 {
+            Ok(Mem::Null)
+        } else {
+            Ok(Mem::Real(self.sum / self.count as f64))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MinState {
+    min: Option<Mem>,
+}
+impl sqlite3_vdbe::AggregateState for MinState {
+    fn step(&mut self, args: &[Mem]) -> Result<(), String> {
+        if let Some(val) = args.first() {
+            if !val.is_null() {
+                if let Some(m) = &self.min {
+                    if val.cmp(m) == std::cmp::Ordering::Less {
+                        self.min = Some(val.clone());
+                    }
+                } else {
+                    self.min = Some(val.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+    fn finalize(&mut self) -> Result<Mem, String> {
+        Ok(self.min.take().unwrap_or(Mem::Null))
+    }
+}
+
+#[derive(Debug)]
+struct MaxState {
+    max: Option<Mem>,
+}
+impl sqlite3_vdbe::AggregateState for MaxState {
+    fn step(&mut self, args: &[Mem]) -> Result<(), String> {
+        if let Some(val) = args.first() {
+            if !val.is_null() {
+                if let Some(m) = &self.max {
+                    if val.cmp(m) == std::cmp::Ordering::Greater {
+                        self.max = Some(val.clone());
+                    }
+                } else {
+                    self.max = Some(val.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+    fn finalize(&mut self) -> Result<Mem, String> {
+        Ok(self.max.take().unwrap_or(Mem::Null))
+    }
+}
+
 // ── Scalar functions ──────────────────────────────────────────────────────────
 
 /// Dynamically dispatch a scalar function call by name.
@@ -65,6 +188,7 @@ pub fn func_typeof(args: &[Mem]) -> FuncResult<Mem> {
         Some(Mem::Text(_))  => "text",
         Some(Mem::Blob(_)) | Some(Mem::ZeroBlob(_)) => "blob",
         None                => "null",
+        Some(Mem::Agg(_))   => "blob", // Treat aggregators as blobs from SQL perspective
     };
     Ok(Mem::Text(std::sync::Arc::from(t)))
 }

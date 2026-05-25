@@ -10,6 +10,12 @@ use sqlite3_btree::{BTree, BTreeCursor, PageKind, SeekBias, SeekResult};
 use std::sync::Arc;
 
 
+/// Trait for aggregate function states (e.g., SUM, COUNT).
+pub trait AggregateState: std::fmt::Debug {
+    fn step(&mut self, args: &[Mem]) -> Result<(), String>;
+    fn finalize(&mut self) -> Result<Mem, String>;
+}
+
 /// A VDBE register value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mem {
@@ -20,6 +26,8 @@ pub enum Mem {
     Blob(Arc<[u8]>),
     /// Zero-blob placeholder: a blob of `n` zero bytes, materialized on demand.
     ZeroBlob(i64),
+    /// Aggregate state index (internal pointer to Vdbe's aggs list).
+    Agg(usize),
 }
 
 impl Mem {
@@ -35,6 +43,7 @@ impl Mem {
             Mem::Text(s) => !s.is_empty(),
             Mem::Blob(b) => !b.is_empty(),
             Mem::ZeroBlob(_) => false,
+            Mem::Agg(_) => false,
         }
     }
 
@@ -65,6 +74,7 @@ impl Mem {
                 Mem::Int(_) | Mem::Real(_) => 2,
                 Mem::Text(_) => 3,
                 Mem::Blob(_) | Mem::ZeroBlob(_) => 4,
+                Mem::Agg(_) => 5,
             }
         }
 
@@ -83,7 +93,7 @@ impl Mem {
             (Mem::Real(f1), Mem::Int(i2)) => f1.total_cmp(&(*i2 as f64)),
             (Mem::Text(s1), Mem::Text(s2)) => s1.cmp(s2), // simple binary string cmp for now
             (Mem::Blob(b1), Mem::Blob(b2)) => b1.cmp(b2),
-            (Mem::ZeroBlob(n1), Mem::ZeroBlob(n2)) => n1.cmp(n2),
+            (Mem::ZeroBlob(a), Mem::ZeroBlob(b)) => a.cmp(b),
             (Mem::Blob(b1), Mem::ZeroBlob(n2)) => {
                 let zero_len = *n2 as usize;
                 for i in 0..std::cmp::min(b1.len(), zero_len) {
@@ -102,6 +112,8 @@ impl Mem {
                 }
                 zero_len.cmp(&b2.len())
             }
+            (Mem::Agg(_), _) => Ordering::Equal,
+            (_, Mem::Agg(_)) => Ordering::Equal,
             _ => Ordering::Equal,
         }
     }
@@ -264,15 +276,14 @@ pub enum Opcode {
     NotNull,
     // Limit and Loop control
     DecrJumpZero,
-    // Function execution
-    Function,
     // Sorting
     SorterOpen,
     SorterInsert,
     SorterSort,
     SorterData,
     SorterNext,
-    // Aggregation
+    // Functions & Aggregates
+    Function,
     AggStep,
     AggFinal,
     // Misc
@@ -308,6 +319,10 @@ pub struct Vdbe {
     pub n_cursors: usize,
     /// Function dispatcher to handle Opcode::Function.
     pub func_dispatcher: Option<fn(&str, &[Mem]) -> Result<Mem, String>>,
+    /// Dispatcher to instantiate aggregate states for Opcode::AggStep.
+    pub agg_dispatcher: Option<fn(&str) -> Result<Box<dyn AggregateState>, String>>,
+    /// Instantiated aggregate states.
+    aggs: Vec<Box<dyn AggregateState>>,
 }
 
 impl Default for Vdbe {
@@ -328,6 +343,8 @@ impl Vdbe {
             last_result_row: None,
             n_cursors: 0,
             func_dispatcher: None,
+            agg_dispatcher: None,
+            aggs: Vec::new(),
         }
     }
 
@@ -341,6 +358,8 @@ impl Vdbe {
             last_result_row: None,
             n_cursors: 0,
             func_dispatcher: None,
+            agg_dispatcher: None,
+            aggs: Vec::new(),
         }
     }
 
@@ -559,6 +578,7 @@ impl Vdbe {
                             Mem::Text(v) => sqlite3_record::Value::Text(v.as_bytes().to_vec()),
                             Mem::Blob(v) => sqlite3_record::Value::Blob(v.to_vec()),
                             Mem::ZeroBlob(n) => sqlite3_record::Value::ZeroBlob(*n),
+                            Mem::Agg(_) => return Err(VdbeError::Exec("Cannot serialize Aggregate".into())),
                         };
                         values.push(val);
                     }
@@ -975,6 +995,72 @@ impl Vdbe {
                     }
                 }
 
+                Opcode::AggStep => {
+                    let argc = op.p1 as usize;
+                    let arg_reg = op.p2 as usize;
+                    let dest_reg = op.p3 as usize; // Holds Mem::Agg(idx)
+                    let func_name = match &op.p4 {
+                        P4::Text(s) => s.to_string(),
+                        _ => return Err(VdbeError::Exec("AggStep p4 must be func name".to_string())),
+                    };
+
+                    // Initialize the accumulator if it is Null.
+                    if self.regs[dest_reg].is_null() {
+                        if let Some(dispatcher) = self.agg_dispatcher {
+                            let agg_state = dispatcher(&func_name).map_err(|e| VdbeError::Exec(format!("AggStep {}: {}", func_name, e)))?;
+                            let idx = self.aggs.len();
+                            self.aggs.push(agg_state);
+                            self.regs[dest_reg] = Mem::Agg(idx);
+                        } else {
+                            return Err(VdbeError::Exec(format!("no agg dispatcher available for {}", func_name)));
+                        }
+                    }
+
+                    let idx = match self.regs[dest_reg] {
+                        Mem::Agg(i) => i,
+                        _ => return Err(VdbeError::Exec("AggStep destination is not an aggregate".to_string())),
+                    };
+
+                    let args = if argc > 0 {
+                        &self.regs[arg_reg..(arg_reg + argc)]
+                    } else {
+                        &[]
+                    };
+
+                    if let Some(agg_state) = self.aggs.get_mut(idx) {
+                        agg_state.step(args).map_err(|e| VdbeError::Exec(format!("AggStep {}: {}", func_name, e)))?;
+                    } else {
+                        return Err(VdbeError::Exec("Invalid aggregate index".to_string()));
+                    }
+                }
+
+                Opcode::AggFinal => {
+                    let dest_reg = op.p1 as usize;
+                    let func_name = match &op.p4 {
+                        P4::Text(s) => s.to_string(),
+                        _ => return Err(VdbeError::Exec("AggFinal p4 must be func name".to_string())),
+                    };
+
+                    if self.regs[dest_reg].is_null() {
+                        // If no rows were processed, initialize to compute empty-set final value.
+                        if let Some(dispatcher) = self.agg_dispatcher {
+                            let mut agg_state = dispatcher(&func_name).map_err(|e| VdbeError::Exec(format!("AggFinal {}: {}", func_name, e)))?;
+                            self.regs[dest_reg] = agg_state.finalize().map_err(|e| VdbeError::Exec(format!("AggFinal {}: {}", func_name, e)))?;
+                        } else {
+                            return Err(VdbeError::Exec(format!("no agg dispatcher available for {}", func_name)));
+                        }
+                    } else if let Mem::Agg(idx) = self.regs[dest_reg] {
+                        if let Some(agg_state) = self.aggs.get_mut(idx) {
+                            let final_val = agg_state.finalize().map_err(|e| VdbeError::Exec(format!("AggFinal {}: {}", func_name, e)))?;
+                            self.regs[dest_reg] = final_val;
+                        } else {
+                            return Err(VdbeError::Exec("Invalid aggregate index".to_string()));
+                        }
+                    } else {
+                        return Err(VdbeError::Exec("AggFinal destination is not an aggregate".to_string()));
+                    }
+                }
+
                 Opcode::ResultRow => {
                     self.last_result_row = Some((op.p1 as usize, op.p2 as usize));
                     return Ok(StepResult::Row);
@@ -995,7 +1081,12 @@ impl Vdbe {
         self.pc = 0;
         self.halted = false;
         self.last_result_row = None;
-        for r in &mut self.regs { *r = Mem::Null; }
+        self.aggs.clear();
+        for r in &mut self.regs {
+            if let Mem::Agg(_) = r {
+                *r = Mem::Null;
+            }
+        }
         Ok(())
     }
 }

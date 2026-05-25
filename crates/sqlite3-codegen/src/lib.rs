@@ -22,17 +22,32 @@ pub enum CodegenError {
 pub type CodegenResult<T> = Result<T, CodegenError>;
 
 pub struct Compiler<'a> {
-    vm: Vdbe,
-    schema: Option<&'a Schema>,
+    pub vm: Vdbe,
+    pub schema: Option<&'a Schema>,
+    agg_regs: Vec<(Expr, usize)>,
+}
+
+impl Default for Compiler<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'a> Compiler<'a> {
     pub fn new() -> Self {
-        Self { vm: Vdbe::new(), schema: None }
+        Self {
+            vm: Vdbe::new(),
+            schema: None,
+            agg_regs: Vec::new(),
+        }
     }
 
     pub fn with_schema(schema: &'a Schema) -> Self {
-        Self { vm: Vdbe::new(), schema: Some(schema) }
+        Self {
+            vm: Vdbe::new(),
+            schema: Some(schema),
+            agg_regs: Vec::new(),
+        }
     }
 
     pub fn compile(mut self, stmt: &Stmt) -> CodegenResult<Vdbe> {
@@ -115,6 +130,10 @@ impl<'a> Compiler<'a> {
         body: &SimpleSelect,
         from: &FromClause,
     ) -> CodegenResult<()> {
+        if Self::is_aggregate_query(body) {
+            return self.compile_aggregate_select(select, body, from);
+        }
+
         // Only single-table scans for now; no joins.
         if from.tables.len() != 1 || !from.joins.is_empty() {
             return Err(CodegenError::NotImplemented);
@@ -361,7 +380,426 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// Compile a WHERE predicate. Returns the list of instruction addresses
+    fn extract_aggregates(expr: &Expr, aggs: &mut Vec<Expr>) {
+        let is_agg = match expr {
+            Expr::Function { name, .. } => {
+                let n = name.to_ascii_lowercase();
+                n == "count" || n == "sum" || n == "avg" || n == "min" || n == "max"
+            }
+            _ => false,
+        };
+        if is_agg {
+            if !aggs.contains(expr) {
+                aggs.push(expr.clone());
+            }
+        } else {
+            match expr {
+                Expr::Unary { operand, .. } => Self::extract_aggregates(operand, aggs),
+                Expr::Binary { left, right, .. } => {
+                    Self::extract_aggregates(left, aggs);
+                    Self::extract_aggregates(right, aggs);
+                }
+                Expr::Cast { expr, .. } => Self::extract_aggregates(expr, aggs),
+                Expr::Collate { expr, .. } => Self::extract_aggregates(expr, aggs),
+                Expr::Like { lhs, rhs, escape, .. } => {
+                    Self::extract_aggregates(lhs, aggs);
+                    Self::extract_aggregates(rhs, aggs);
+                    if let Some(e) = escape { Self::extract_aggregates(e, aggs); }
+                }
+                Expr::IsNull { expr, .. } => Self::extract_aggregates(expr, aggs),
+                Expr::Is { lhs, rhs, .. } => {
+                    Self::extract_aggregates(lhs, aggs);
+                    Self::extract_aggregates(rhs, aggs);
+                }
+                Expr::Between { expr, low, high, .. } => {
+                    Self::extract_aggregates(expr, aggs);
+                    Self::extract_aggregates(low, aggs);
+                    Self::extract_aggregates(high, aggs);
+                }
+                Expr::In { expr, .. } => Self::extract_aggregates(expr, aggs),
+                Expr::Case { base, arms, else_ } => {
+                    if let Some(b) = base { Self::extract_aggregates(b, aggs); }
+                    for arm in arms {
+                        Self::extract_aggregates(&arm.when, aggs);
+                        Self::extract_aggregates(&arm.then, aggs);
+                    }
+                    if let Some(e) = else_ { Self::extract_aggregates(e, aggs); }
+                }
+                Expr::RowValue(exprs) => {
+                    for e in exprs { Self::extract_aggregates(e, aggs); }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn is_aggregate_query(body: &SimpleSelect) -> bool {
+        if !body.group_by.is_empty() { return true; }
+        if body.having.is_some() { return true; }
+        let mut aggs = Vec::new();
+        for rc in &body.result_columns {
+            if let ResultColumn::Expr { expr, .. } = rc {
+                Self::extract_aggregates(expr, &mut aggs);
+            }
+        }
+        !aggs.is_empty()
+    }
+
+    fn compile_aggregate_select(
+        &mut self,
+        select: &SelectStmt,
+        body: &SimpleSelect,
+        from: &FromClause,
+    ) -> CodegenResult<()> {
+        if from.tables.len() != 1 || !from.joins.is_empty() {
+            return Err(CodegenError::NotImplemented);
+        }
+        let table_name = match &from.tables[0] {
+            TableOrSubquery::Table { name, .. } => name.clone(),
+            _ => return Err(CodegenError::NotImplemented),
+        };
+
+        let schema_obj = self.schema
+            .ok_or_else(|| CodegenError::Schema("no schema context".to_string()))?
+            .get(&table_name)
+            .ok_or_else(|| CodegenError::Schema(format!("table '{}' not found", table_name)))?;
+        let root_page = schema_obj.root_page;
+        let schema_cols = schema_obj.columns.clone();
+
+        let cursor_id = self.vm.n_cursors;
+        self.vm.n_cursors += 1;
+
+        let mut aggs = Vec::new();
+        for rc in &body.result_columns {
+            if let ResultColumn::Expr { expr, .. } = rc {
+                Self::extract_aggregates(expr, &mut aggs);
+            }
+        }
+        if let Some(having) = &body.having {
+            Self::extract_aggregates(having, &mut aggs);
+        }
+
+        let mut agg_regs_assigned = Vec::new();
+        for agg in &aggs {
+            agg_regs_assigned.push((agg.clone(), self.vm.alloc_reg()));
+        }
+        self.agg_regs = agg_regs_assigned.clone();
+
+        let has_group_by = !body.group_by.is_empty();
+        let group_by_cursor = if has_group_by {
+            let sorter = self.vm.n_cursors;
+            self.vm.n_cursors += 1;
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::SorterOpen,
+                p1: sorter as i32, p2: 0, p3: 0, p4: P4::None, p5: 0,
+            });
+            Some(sorter)
+        } else {
+            None
+        };
+
+        self.vm.emit(VdbeOp {
+            opcode: Opcode::OpenRead,
+            p1: cursor_id as i32, p2: root_page as i32, p3: 0, p4: P4::None, p5: 0,
+        });
+        
+        let rewind_addr = self.vm.emit(VdbeOp {
+            opcode: Opcode::Rewind,
+            p1: cursor_id as i32, p2: 0, p3: 0, p4: P4::None, p5: 0,
+        });
+
+        let loop_top = self.vm.ops.len();
+
+        let next_label_patches = if let Some(where_expr) = &body.where_ {
+            self.compile_where_expr(where_expr, cursor_id, &schema_cols)?
+        } else {
+            vec![]
+        };
+
+        if let Some(sorter) = group_by_cursor {
+            let mut group_regs = Vec::new();
+            for gb_expr in &body.group_by {
+                group_regs.push(self.compile_expr(gb_expr, Some((cursor_id, &schema_cols)))?);
+            }
+            
+            let mut all_agg_args = Vec::new();
+            for agg in &aggs {
+                if let Expr::Function { args, .. } = agg {
+                    match args {
+                        sqlite3_ast::FunctionArgs::List(exprs) | sqlite3_ast::FunctionArgs::Distinct(exprs) => {
+                            for e in exprs {
+                                all_agg_args.push(self.compile_expr(e, Some((cursor_id, &schema_cols)))?);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            
+            let total_fields = group_regs.len() + all_agg_args.len();
+            let record_start = if total_fields > 0 {
+                let start = self.vm.alloc_reg();
+                for _ in 1..total_fields { self.vm.alloc_reg(); }
+                for (i, &r) in group_regs.iter().chain(all_agg_args.iter()).enumerate() {
+                    self.vm.emit(VdbeOp { opcode: Opcode::Copy, p1: r as i32, p2: (start + i) as i32, p3: 0, p4: P4::None, p5: 0 });
+                }
+                start
+            } else { 0 };
+            
+            let record_reg = self.vm.alloc_reg();
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::MakeRecord,
+                p1: record_start as i32, p2: total_fields as i32, p3: record_reg as i32, p4: P4::None, p5: 0,
+            });
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::SorterInsert,
+                p1: sorter as i32, p2: record_reg as i32, p3: 0, p4: P4::None, p5: 0,
+            });
+        } else {
+            for (agg, dest_reg) in &agg_regs_assigned {
+                if let Expr::Function { name, args, .. } = agg {
+                    let mut arg_regs = Vec::new();
+                    let argc = match args {
+                        sqlite3_ast::FunctionArgs::List(exprs) | sqlite3_ast::FunctionArgs::Distinct(exprs) => {
+                            for e in exprs { arg_regs.push(self.compile_expr(e, Some((cursor_id, &schema_cols)))?); }
+                            exprs.len()
+                        }
+                        _ => 0,
+                    };
+                    let arg_start = if argc > 0 {
+                        let start = self.vm.alloc_reg();
+                        for _ in 1..argc { self.vm.alloc_reg(); }
+                        for (i, &r) in arg_regs.iter().enumerate() {
+                            self.vm.emit(VdbeOp { opcode: Opcode::Copy, p1: r as i32, p2: (start + i) as i32, p3: 0, p4: P4::None, p5: 0 });
+                        }
+                        start
+                    } else { 0 };
+                    
+                    self.vm.emit(VdbeOp {
+                        opcode: Opcode::AggStep,
+                        p1: argc as i32, p2: arg_start as i32, p3: *dest_reg as i32,
+                        p4: P4::Text(std::sync::Arc::from(name.as_ref())), p5: 0,
+                    });
+                }
+            }
+        }
+
+        let next_addr = self.vm.emit(VdbeOp {
+            opcode: Opcode::Next,
+            p1: cursor_id as i32, p2: loop_top as i32, p3: 0, p4: P4::None, p5: 0,
+        });
+
+        let end_table_loop = self.vm.ops.len();
+        self.vm.ops[rewind_addr].p2 = end_table_loop as i32;
+        for patch in next_label_patches {
+            self.vm.ops[patch].p2 = next_addr as i32;
+        }
+
+        let result_reg_start = self.vm.alloc_reg();
+        for _ in 1..body.result_columns.len() { self.vm.alloc_reg(); }
+
+        if let Some(sorter) = group_by_cursor {
+            let sort_top = self.vm.ops.len();
+            let sorter_sort = self.vm.emit(VdbeOp {
+                opcode: Opcode::SorterSort,
+                p1: sorter as i32, p2: 0, p3: 0, p4: P4::None, p5: 0,
+            });
+            let first_row_flag = self.vm.alloc_reg();
+            self.vm.emit(VdbeOp { opcode: Opcode::Integer, p1: 1, p2: first_row_flag as i32, p3: 0, p4: P4::None, p5: 0 });
+            
+            let sorter_loop = self.vm.ops.len();
+            
+            let mut prev_keys = Vec::new();
+            for _ in &body.group_by { prev_keys.push(self.vm.alloc_reg()); }
+            let mut curr_keys = Vec::new();
+            for _ in &body.group_by { curr_keys.push(self.vm.alloc_reg()); }
+            
+            for (i, reg) in curr_keys.iter().enumerate() {
+                self.vm.emit(VdbeOp { opcode: Opcode::Column, p1: sorter as i32, p2: i as i32, p3: *reg as i32, p4: P4::None, p5: 0 });
+            }
+            let z_reg = self.vm.alloc_reg();
+            self.vm.emit(VdbeOp { opcode: Opcode::Integer, p1: 0, p2: z_reg as i32, p3: 0, p4: P4::None, p5: 0 });
+            let jump_first = self.vm.emit(VdbeOp { opcode: Opcode::Ne, p1: first_row_flag as i32, p2: 0, p3: z_reg as i32, p4: P4::None, p5: 0 });
+            
+            let mut ne_jumps = Vec::new();
+            for (curr, prev) in curr_keys.iter().zip(prev_keys.iter()) {
+                ne_jumps.push(self.vm.emit(VdbeOp { opcode: Opcode::Ne, p1: *curr as i32, p2: 0, p3: *prev as i32, p4: P4::None, p5: 0 }));
+            }
+            let jump_same = self.vm.emit(VdbeOp { opcode: Opcode::Goto, p1: 0, p2: 0, p3: 0, p4: P4::None, p5: 0 });
+            
+            let group_changed_addr = self.vm.ops.len();
+            for j in ne_jumps { self.vm.ops[j].p2 = group_changed_addr as i32; }
+            
+            for (agg, dest_reg) in &agg_regs_assigned {
+                if let Expr::Function { name, .. } = agg {
+                    self.vm.emit(VdbeOp {
+                        opcode: Opcode::AggFinal,
+                        p1: *dest_reg as i32, p2: 0, p3: 0,
+                        p4: P4::Text(std::sync::Arc::from(name.as_ref())), p5: 0,
+                    });
+                }
+            }
+            
+            let mut having_jump = None;
+            
+            // Map GROUP BY expressions to their extracted registers so that HAVING and SELECT don't access the table cursor.
+            for (gb_expr, reg) in body.group_by.iter().zip(prev_keys.iter()) {
+                println!("pushing group by to agg_regs: {:?} -> {}", gb_expr, *reg);
+                self.agg_regs.push((gb_expr.clone(), *reg));
+            }
+
+            if let Some(having) = &body.having {
+                println!("compiling having: {:?}", having);
+                let h_reg = self.compile_expr(having, Some((cursor_id, &schema_cols)))?;
+                having_jump = Some(self.vm.emit(VdbeOp { opcode: Opcode::Eq, p1: h_reg as i32, p2: 0, p3: z_reg as i32, p4: P4::None, p5: 0 }));
+            }
+            
+            for (i, rc) in body.result_columns.iter().enumerate() {
+                match rc {
+                    ResultColumn::Expr { expr, .. } => {
+                        println!("compiling result column expr: {:?}", expr);
+                        let r = self.compile_expr(expr, Some((cursor_id, &schema_cols)))?;
+                        self.vm.emit(VdbeOp { opcode: Opcode::Copy, p1: r as i32, p2: (result_reg_start + i) as i32, p3: 0, p4: P4::None, p5: 0 });
+                    }
+                    _ => return Err(CodegenError::NotImplemented),
+                }
+            }
+            
+            self.agg_regs.truncate(agg_regs_assigned.len());
+            
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::ResultRow,
+                p1: result_reg_start as i32, p2: body.result_columns.len() as i32, p3: 0, p4: P4::None, p5: 0,
+            });
+            
+            let skip_yield = self.vm.ops.len();
+            if let Some(hj) = having_jump { self.vm.ops[hj].p2 = skip_yield as i32; }
+            
+            for (_, dest_reg) in &agg_regs_assigned {
+                self.vm.emit(VdbeOp { opcode: Opcode::Null, p1: 0, p2: *dest_reg as i32, p3: 0, p4: P4::None, p5: 0 });
+            }
+            
+            let first_row_addr = self.vm.ops.len();
+            self.vm.ops[jump_first].p2 = first_row_addr as i32;
+            self.vm.emit(VdbeOp { opcode: Opcode::Integer, p1: 0, p2: first_row_flag as i32, p3: 0, p4: P4::None, p5: 0 });
+            for (curr, prev) in curr_keys.iter().zip(prev_keys.iter()) {
+                self.vm.emit(VdbeOp { opcode: Opcode::Copy, p1: *curr as i32, p2: *prev as i32, p3: 0, p4: P4::None, p5: 0 });
+            }
+            
+            let same_group_addr = self.vm.ops.len();
+            self.vm.ops[jump_same].p2 = same_group_addr as i32;
+            
+            let mut arg_col_idx = body.group_by.len();
+            for (agg, dest_reg) in &agg_regs_assigned {
+                if let Expr::Function { name, args, .. } = agg {
+                    let argc = match args {
+                        sqlite3_ast::FunctionArgs::List(exprs) | sqlite3_ast::FunctionArgs::Distinct(exprs) => exprs.len(),
+                        _ => 0,
+                    };
+                    let arg_start = if argc > 0 {
+                        let start = self.vm.alloc_reg();
+                        for _ in 1..argc { self.vm.alloc_reg(); }
+                        for i in 0..argc {
+                            self.vm.emit(VdbeOp { opcode: Opcode::Column, p1: sorter as i32, p2: (arg_col_idx + i) as i32, p3: (start + i) as i32, p4: P4::None, p5: 0 });
+                        }
+                        arg_col_idx += argc;
+                        start
+                    } else { 0 };
+                    self.vm.emit(VdbeOp {
+                        opcode: Opcode::AggStep,
+                        p1: argc as i32, p2: arg_start as i32, p3: *dest_reg as i32,
+                        p4: P4::Text(std::sync::Arc::from(name.as_ref())), p5: 0,
+                    });
+                }
+            }
+            
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::SorterNext,
+                p1: sorter as i32, p2: sorter_loop as i32, p3: 0, p4: P4::None, p5: 0,
+            });
+            
+            let end_sorter_loop = self.vm.ops.len();
+            self.vm.ops[sorter_sort].p2 = end_sorter_loop as i32;
+            
+            // final yield for the last group
+            for (agg, dest_reg) in &agg_regs_assigned {
+                if let Expr::Function { name, .. } = agg {
+                    self.vm.emit(VdbeOp {
+                        opcode: Opcode::AggFinal,
+                        p1: *dest_reg as i32, p2: 0, p3: 0,
+                        p4: P4::Text(std::sync::Arc::from(name.as_ref())), p5: 0,
+                    });
+                }
+            }
+            
+            for (gb_expr, reg) in body.group_by.iter().zip(curr_keys.iter()) {
+                self.agg_regs.push((gb_expr.clone(), *reg));
+            }
+            
+            let mut having_jump_final = None;
+            if let Some(having) = &body.having {
+                let h_reg = self.compile_expr(having, Some((cursor_id, &schema_cols)))?;
+                having_jump_final = Some(self.vm.emit(VdbeOp { opcode: Opcode::Eq, p1: h_reg as i32, p2: 0, p3: z_reg as i32, p4: P4::None, p5: 0 }));
+            }
+            for (i, rc) in body.result_columns.iter().enumerate() {
+                match rc {
+                    ResultColumn::Expr { expr, .. } => {
+                        let r = self.compile_expr(expr, Some((cursor_id, &schema_cols)))?;
+                        self.vm.emit(VdbeOp { opcode: Opcode::Copy, p1: r as i32, p2: (result_reg_start + i) as i32, p3: 0, p4: P4::None, p5: 0 });
+                    }
+                    _ => return Err(CodegenError::NotImplemented),
+                }
+            }
+            
+            self.agg_regs.truncate(agg_regs_assigned.len());
+            
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::ResultRow,
+                p1: result_reg_start as i32, p2: body.result_columns.len() as i32, p3: 0, p4: P4::None, p5: 0,
+            });
+            let skip_final_yield = self.vm.ops.len();
+            if let Some(hj) = having_jump_final { self.vm.ops[hj].p2 = skip_final_yield as i32; }
+
+        } else {
+            for (agg, dest_reg) in &agg_regs_assigned {
+                if let Expr::Function { name, .. } = agg {
+                    self.vm.emit(VdbeOp {
+                        opcode: Opcode::AggFinal,
+                        p1: *dest_reg as i32, p2: 0, p3: 0,
+                        p4: P4::Text(std::sync::Arc::from(name.as_ref())), p5: 0,
+                    });
+                }
+            }
+            
+            let mut having_jump = None;
+            if let Some(having) = &body.having {
+                let h_reg = self.compile_expr(having, Some((cursor_id, &schema_cols)))?;
+                let z_reg = self.vm.alloc_reg();
+                self.vm.emit(VdbeOp { opcode: Opcode::Integer, p1: 0, p2: z_reg as i32, p3: 0, p4: P4::None, p5: 0 });
+                having_jump = Some(self.vm.emit(VdbeOp { opcode: Opcode::Eq, p1: h_reg as i32, p2: 0, p3: z_reg as i32, p4: P4::None, p5: 0 }));
+            }
+            
+            for (i, rc) in body.result_columns.iter().enumerate() {
+                match rc {
+                    ResultColumn::Expr { expr, .. } => {
+                        let r = self.compile_expr(expr, Some((cursor_id, &schema_cols)))?;
+                        self.vm.emit(VdbeOp { opcode: Opcode::Copy, p1: r as i32, p2: (result_reg_start + i) as i32, p3: 0, p4: P4::None, p5: 0 });
+                    }
+                    _ => return Err(CodegenError::NotImplemented),
+                }
+            }
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::ResultRow,
+                p1: result_reg_start as i32, p2: body.result_columns.len() as i32, p3: 0, p4: P4::None, p5: 0,
+            });
+            let skip_yield = self.vm.ops.len();
+            if let Some(hj) = having_jump { self.vm.ops[hj].p2 = skip_yield as i32; }
+        }
+
+        Ok(())
+    }
+
+    /// Compile a generic WHERE expression, returning a list of instruction indicesses
     /// whose `p2` (jump target) must be patched to the "skip row" label.
     ///
     /// Strategy: evaluate the predicate into a register, then emit `IfNot` to
@@ -447,6 +885,13 @@ impl<'a> Compiler<'a> {
         expr: &Expr,
         cursor_ctx: Option<(usize, &[sqlite3_ast::ColumnDef])>,
     ) -> CodegenResult<usize> {
+        println!("compile_expr: searching for expr: {:?}", expr);
+        println!("compile_expr: self.agg_regs: {:?}", self.agg_regs);
+        if let Some((_, reg)) = self.agg_regs.iter().find(|(e, _)| e == expr) {
+            println!("compile_expr: found in agg_regs! returning {}", reg);
+            return Ok(*reg);
+        }
+
         match expr {
             Expr::Literal(val) => {
                 let r = self.vm.alloc_reg();
@@ -581,7 +1026,7 @@ impl<'a> Compiler<'a> {
                 Ok(r)
             }
 
-            Expr::Function { name, args, schema: _, filter: _, over: _ } => {
+            Expr::Function { name, args, .. } => {
                 // Compile all arguments first
                 let mut arg_regs = Vec::new();
                 let argc = match args {
