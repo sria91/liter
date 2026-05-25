@@ -94,12 +94,20 @@ impl<'a> Parser<'a> {
 
     /// Consume the next token only if it matches `expected` (best-effort, no error).
     fn consume_optional(&mut self, expected: Token<'a>) {
-        if let Ok(Some(t)) = self.peek() {
+        let _ = self.consume_if(expected);
+    }
+
+    /// Consume the next token if it matches `expected` and return true if consumed.
+    fn consume_if(&mut self, expected: Token<'a>) -> Result<bool, ParseError> {
+        if let Some(t) = self.peek()? {
             if *t == expected {
-                let _ = self.consume();
+                self.consume()?;
+                return Ok(true);
             }
         }
+        Ok(false)
     }
+
 
     fn parse_select_stmt(&mut self) -> ParseResult<SelectStmt> {
         self.expect(Token::Select)?;
@@ -176,6 +184,63 @@ impl<'a> Parser<'a> {
             where_ = Some(self.parse_expr()?);
         }
 
+        let mut order_by = vec![];
+        if self.consume_if(Token::Order)? {
+            self.expect(Token::By)?;
+            loop {
+                let expr = self.parse_expr()?;
+                let mut direction = SortDirection::Asc;
+                if self.consume_if(Token::Asc)? {
+                    direction = SortDirection::Asc;
+                } else if self.consume_if(Token::Desc)? {
+                    direction = SortDirection::Desc;
+                }
+
+                let mut nulls = NullsOrder::Default;
+                if self.consume_if(Token::Nulls)? {
+                    if self.consume_if(Token::First)? {
+                        nulls = NullsOrder::First;
+                    } else if self.consume_if(Token::Last)? {
+                        nulls = NullsOrder::Last;
+                    } else {
+                        return Err(ParseError::SyntaxError("expected FIRST or LAST after NULLS".to_string()));
+                    }
+                }
+
+                order_by.push(OrderingTerm {
+                    expr,
+                    direction,
+                    nulls,
+                });
+
+                if !self.consume_if(Token::Comma)? {
+                    break;
+                }
+            }
+        }
+
+        let mut limit = None;
+        if self.consume_if(Token::Limit)? {
+            let limit_expr = self.parse_expr()?;
+            if self.consume_if(Token::Offset)? {
+                limit = Some(LimitClause {
+                    limit: limit_expr,
+                    offset: Some(self.parse_expr()?),
+                });
+            } else if self.consume_if(Token::Comma)? {
+                // LIMIT offset, limit
+                limit = Some(LimitClause {
+                    limit: self.parse_expr()?,
+                    offset: Some(limit_expr),
+                });
+            } else {
+                limit = Some(LimitClause {
+                    limit: limit_expr,
+                    offset: None,
+                });
+            }
+        }
+
         Ok(SelectStmt {
             with: None,
             body: SelectBody::Simple(SimpleSelect {
@@ -187,8 +252,8 @@ impl<'a> Parser<'a> {
                 having: None,
                 window: vec![],
             }),
-            order_by: vec![],
-            limit: None,
+            order_by,
+            limit,
         })
     }
 
@@ -428,11 +493,38 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Ident(id)) => {
                 self.consume()?;
-                Ok(Expr::Column {
-                    schema: None,
-                    table: None,
-                    name: id.to_string(),
-                })
+                if self.consume_if(Token::LParen)? {
+                    let args;
+                    if self.consume_if(Token::RParen)? {
+                        args = FunctionArgs::None;
+                    } else if self.consume_if(Token::Star)? {
+                        self.expect(Token::RParen)?;
+                        args = FunctionArgs::Star;
+                    } else {
+                        let mut exprs = vec![];
+                        loop {
+                            exprs.push(self.parse_expr()?);
+                            if !self.consume_if(Token::Comma)? {
+                                break;
+                            }
+                        }
+                        self.expect(Token::RParen)?;
+                        args = FunctionArgs::List(exprs);
+                    }
+                    Ok(Expr::Function {
+                        schema: None,
+                        name: id.to_string(),
+                        args,
+                        filter: None,
+                        over: None,
+                    })
+                } else {
+                    Ok(Expr::Column {
+                        schema: None,
+                        table: None,
+                        name: id.to_string(),
+                    })
+                }
             }
             Some(Token::LParen) => {
                 self.consume()?;

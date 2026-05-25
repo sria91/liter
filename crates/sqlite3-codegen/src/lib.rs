@@ -67,17 +67,17 @@ impl<'a> Compiler<'a> {
         };
 
         if let Some(from) = &body.from {
-            self.compile_select_with_from(body, from)?;
+            self.compile_select_with_from(select, body, from)?;
         } else {
             // Literal projection: SELECT expr, expr, ...
-            self.compile_select_literal(body)?;
+            self.compile_select_literal(select, body)?;
         }
 
         Ok(())
     }
 
     /// Compile a `SELECT` with no `FROM` clause (pure expression projection).
-    fn compile_select_literal(&mut self, body: &SimpleSelect) -> CodegenResult<()> {
+    fn compile_select_literal(&mut self, select: &SelectStmt, body: &SimpleSelect) -> CodegenResult<()> {
         let num_cols = body.result_columns.len();
         let result_reg_start = self.vm.alloc_reg();
         for _ in 1..num_cols {
@@ -111,6 +111,7 @@ impl<'a> Compiler<'a> {
     /// Compile a `SELECT ... FROM table [WHERE expr]` full-table scan.
     fn compile_select_with_from(
         &mut self,
+        select: &SelectStmt,
         body: &SimpleSelect,
         from: &FromClause,
     ) -> CodegenResult<()> {
@@ -217,13 +218,62 @@ impl<'a> Compiler<'a> {
             vec![]
         };
 
-        // Emit: ResultRow
-        self.vm.emit(VdbeOp {
-            opcode: Opcode::ResultRow,
-            p1: result_reg_start as i32,
-            p2: num_cols as i32,
-            p3: 0, p4: P4::None, p5: 0,
-        });
+        let has_order_by = !select.order_by.is_empty();
+        
+        let limit_reg = if let Some(limit) = &select.limit {
+            let limit_reg = self.compile_expr(&limit.limit, None)?;
+            Some(limit_reg)
+        } else {
+            None
+        };
+
+        let sorter_cursor = if has_order_by {
+            let cursor = self.vm.n_cursors;
+            self.vm.n_cursors += 1;
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::SorterOpen,
+                p1: cursor as i32,
+                p2: 0, p3: 0, p4: P4::None, p5: 0,
+            });
+            Some(cursor)
+        } else {
+            None
+        };
+
+        let limit_jump_addr = if sorter_cursor.is_none() && limit_reg.is_some() {
+            Some(self.vm.emit(VdbeOp {
+                opcode: Opcode::DecrJumpZero,
+                p1: limit_reg.unwrap() as i32,
+                p2: 0, // Patched later to point to end_label
+                p3: 0, p4: P4::None, p5: 0,
+            }))
+        } else {
+            None
+        };
+
+        if let Some(s_cur) = sorter_cursor {
+            let record_reg = self.vm.alloc_reg();
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::MakeRecord,
+                p1: result_reg_start as i32,
+                p2: num_cols as i32,
+                p3: record_reg as i32,
+                p4: P4::None, p5: 0,
+            });
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::SorterInsert,
+                p1: s_cur as i32,
+                p2: record_reg as i32,
+                p3: 0, p4: P4::None, p5: 0,
+            });
+        } else {
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::ResultRow,
+                p1: result_reg_start as i32,
+                p2: num_cols as i32,
+                p3: 0, p4: P4::None, p5: 0,
+            });
+        }
 
         // next_label: jump target for WHERE-skipped rows
         let next_label = self.vm.ops.len();
@@ -239,9 +289,67 @@ impl<'a> Compiler<'a> {
             p3: 0, p4: P4::None, p5: 0,
         });
 
-        // end_label: where Rewind jumps on empty table
         let end_label = self.vm.ops.len();
         self.vm.ops[rewind_addr].p2 = end_label as i32;
+        if let Some(l_jump) = limit_jump_addr {
+            self.vm.ops[l_jump].p2 = end_label as i32;
+        }
+        
+        // Output from Sorter if we used one
+        if let Some(s_cur) = sorter_cursor {
+            let sort_top = self.vm.ops.len();
+            let sorter_sort_addr = self.vm.emit(VdbeOp {
+                opcode: Opcode::SorterSort,
+                p1: s_cur as i32,
+                p2: 0, // Patched later
+                p3: 0, p4: P4::None, p5: 0,
+            });
+
+            let sorter_loop = self.vm.ops.len();
+            
+            // Limit check
+            if let Some(l_reg) = limit_reg {
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::DecrJumpZero,
+                    p1: l_reg as i32,
+                    p2: 0, // Patched later (jump to end of sort)
+                    p3: 0, p4: P4::None, p5: 0,
+                });
+            }
+
+            for i in 0..num_cols {
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::Column,
+                    p1: s_cur as i32,
+                    p2: i as i32,
+                    p3: (result_reg_start + i) as i32,
+                    p4: P4::None, p5: 0,
+                });
+            }
+
+            // ResultRow for sorted data
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::ResultRow,
+                p1: result_reg_start as i32,
+                p2: num_cols as i32,
+                p3: 0, p4: P4::None, p5: 0,
+            });
+
+            self.vm.emit(VdbeOp {
+                opcode: Opcode::SorterNext,
+                p1: s_cur as i32,
+                p2: sorter_loop as i32,
+                p3: 0, p4: P4::None, p5: 0,
+            });
+            
+            let sort_end = self.vm.ops.len();
+            self.vm.ops[sorter_sort_addr].p2 = sort_end as i32;
+            
+            if let Some(l_reg) = limit_reg {
+                // Patch the limit jump
+                self.vm.ops[sorter_sort_addr + 1].p2 = sort_end as i32;
+            }
+        }
 
         // Emit: Close cursor
         self.vm.emit(VdbeOp {
@@ -434,17 +542,19 @@ impl<'a> Compiler<'a> {
                     // Comparison ops in SQLite VDBE are conditional jumps, not value producers.
                     // Materialise as: r_res = 0; if cond goto L1; goto L2; L1: r_res = 1; L2:
                     self.vm.emit(VdbeOp { opcode: Opcode::Integer, p1: 0, p2: r_res as i32, p3: 0, p4: P4::None, p5: 0 });
-                    let jump_addr = self.vm.emit(VdbeOp { opcode, p1: r_left as i32, p2: 0, p3: r_right as i32, p4: P4::None, p5: 0 });
+                    // Compare LHS(p3) OP RHS(p1). So p3 = r_left, p1 = r_right.
+                    let jump_addr = self.vm.emit(VdbeOp { opcode, p1: r_right as i32, p2: 0, p3: r_left as i32, p4: P4::None, p5: 0 });
                     let end_addr  = self.vm.emit(VdbeOp { opcode: Opcode::Goto, p1: 0, p2: 0, p3: 0, p4: P4::None, p5: 0 });
                     let true_addr = self.vm.emit(VdbeOp { opcode: Opcode::Integer, p1: 1, p2: r_res as i32, p3: 0, p4: P4::None, p5: 0 });
                     let post_addr = self.vm.ops.len();
                     self.vm.ops[jump_addr].p2 = true_addr as i32;
                     self.vm.ops[end_addr].p2  = post_addr as i32;
                 } else {
+                    // Arithmetic ops: LHS(p2) OP RHS(p1) -> dest(p3)
                     self.vm.emit(VdbeOp {
                         opcode,
-                        p1: r_left as i32,
-                        p2: r_right as i32,
+                        p1: r_right as i32,
+                        p2: r_left as i32,
                         p3: r_res as i32,
                         p4: P4::None, p5: 0,
                     });
@@ -452,7 +562,7 @@ impl<'a> Compiler<'a> {
                 Ok(r_res)
             }
 
-            Expr::Unary { op: UnaryOp::Minus, operand } => {
+            Expr::Unary { op: sqlite3_ast::UnaryOp::Minus, operand } => {
                 let r_inner = self.compile_expr(operand, cursor_ctx)?;
                 let r = self.vm.alloc_reg();
                 // Negate: emit 0 - inner
@@ -469,6 +579,54 @@ impl<'a> Compiler<'a> {
                     p4: P4::None, p5: 0,
                 });
                 Ok(r)
+            }
+
+            Expr::Function { name, args, schema: _, filter: _, over: _ } => {
+                // Compile all arguments first
+                let mut arg_regs = Vec::new();
+                let argc = match args {
+                    sqlite3_ast::FunctionArgs::Star => 0, // COUNT(*)
+                    sqlite3_ast::FunctionArgs::None => 0,
+                    sqlite3_ast::FunctionArgs::List(exprs) | sqlite3_ast::FunctionArgs::Distinct(exprs) => {
+                        for expr in exprs {
+                            arg_regs.push(self.compile_expr(expr, cursor_ctx)?);
+                        }
+                        exprs.len()
+                    }
+                };
+
+                let p2_start = if argc > 0 {
+                    let start = self.vm.alloc_reg();
+                    for _ in 1..argc {
+                        self.vm.alloc_reg();
+                    }
+                    // Copy evaluated args into contiguous block
+                    for (i, &r) in arg_regs.iter().enumerate() {
+                        self.vm.emit(VdbeOp {
+                            opcode: Opcode::Copy,
+                            p1: r as i32,
+                            p2: (start + i) as i32,
+                            p3: 0, p4: P4::None, p5: 0,
+                        });
+                    }
+                    start
+                } else {
+                    0
+                };
+
+                let dest_reg = self.vm.alloc_reg();
+                
+                // For COUNT(*), we pass argc=0 and let the function implementation handle it.
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::Function,
+                    p1: argc as i32,
+                    p2: p2_start as i32,
+                    p3: dest_reg as i32,
+                    p4: P4::Text(Arc::from(name.as_ref())),
+                    p5: 0,
+                });
+                
+                Ok(dest_reg)
             }
 
             _ => Err(CodegenError::NotImplemented),

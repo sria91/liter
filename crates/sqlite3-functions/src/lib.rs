@@ -21,6 +21,24 @@ pub type FuncResult<T> = Result<T, FuncError>;
 
 // ── Scalar functions ──────────────────────────────────────────────────────────
 
+/// Dynamically dispatch a scalar function call by name.
+pub fn dispatch_function(name: &str, args: &[Mem]) -> FuncResult<Mem> {
+    match name.to_ascii_lowercase().as_str() {
+        "abs" => func_abs(args),
+        "length" => func_length(args),
+        "typeof" => func_typeof(args),
+        "upper" => func_upper(args),
+        "lower" => func_lower(args),
+        "coalesce" => func_coalesce(args),
+        "ifnull" => func_ifnull(args),
+        "max" => func_max_scalar(args),
+        "min" => func_min_scalar(args),
+        "round" => func_round(args),
+        "sign" => func_sign(args),
+        _ => Err(FuncError::NotImplemented(name.to_string())),
+    }
+}
+
 pub fn func_abs(args: &[Mem]) -> FuncResult<Mem> {
     match args.first() {
         Some(Mem::Int(i)) => Ok(Mem::Int(i.checked_abs().unwrap_or(i64::MAX))),

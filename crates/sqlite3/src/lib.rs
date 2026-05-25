@@ -161,6 +161,9 @@ impl Connection {
 
         let is_create = matches!(&ast, sqlite3_ast::Stmt::Create(_));
         let mut vm = sqlite3_codegen::compile_with_schema(&ast, &self.schema)?;
+        vm.func_dispatcher = Some(|name, args| {
+            sqlite3_functions::dispatch_function(name, args).map_err(|e| e.to_string())
+        });
 
         // Only auto-begin/commit when NOT inside a user transaction.
         let auto_txn = !self.in_txn.get();
@@ -168,7 +171,7 @@ impl Connection {
             self.btree.begin_write()?;
         }
         
-        let mut cursors: Vec<Option<sqlite3_btree::BTreeCursor>> = Vec::with_capacity(vm.n_cursors);
+        let mut cursors: Vec<Option<sqlite3_vdbe::VdbeCursor>> = Vec::with_capacity(vm.n_cursors);
         for _ in 0..vm.n_cursors { cursors.push(None); }
 
         let mut root_page = None;
@@ -231,8 +234,11 @@ impl Connection {
         let mut results = Vec::new();
 
         let mut vm = sqlite3_codegen::compile_with_schema(&ast, &self.schema)?;
+        vm.func_dispatcher = Some(|name, args| {
+            sqlite3_functions::dispatch_function(name, args).map_err(|e| e.to_string())
+        });
 
-        let mut cursors: Vec<Option<sqlite3_btree::BTreeCursor>> = Vec::with_capacity(vm.n_cursors);
+        let mut cursors: Vec<Option<sqlite3_vdbe::VdbeCursor>> = Vec::with_capacity(vm.n_cursors);
         for _ in 0..vm.n_cursors { cursors.push(None); }
 
         loop {
@@ -314,7 +320,7 @@ pub struct Statement<'conn> {
     vm: sqlite3_vdbe::Vdbe,
     /// One slot per cursor allocated by the compiled program.
     /// Cursor lifetime is tied to `conn.btree` via `'conn`.
-    cursors: Vec<Option<sqlite3_btree::BTreeCursor<'conn>>>,
+    cursors: Vec<Option<sqlite3_vdbe::VdbeCursor<'conn>>>,
     /// Snapshot of the last yielded row (avoids borrow on vm after step).
     column_cache: Vec<Value>,
     done: bool,
