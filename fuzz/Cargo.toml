@@ -10,11 +10,11 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-sqlite3-tokenizer = { path = "../crates/sqlite3-tokenizer" }
-sqlite3-parser = { path = "../crates/sqlite3-parser" }
-sqlite3-record = { path = "../crates/sqlite3-record" }
-sqlite3-vdbe = { path = "../crates/sqlite3-vdbe" }
-sqlite3 = { path = "../crates/sqlite3" }
+liter-tokenizer = { path = "../crates/liter-tokenizer" }
+liter-parser = { path = "../crates/liter-parser" }
+liter-record = { path = "../crates/liter-record" }
+liter-vdbe = { path = "../crates/liter-vdbe" }
+liter = { path = "../crates/liter" }
 
 [[bin]]
 name = "fuzz_tokenizer"

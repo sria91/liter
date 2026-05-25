@@ -33,7 +33,7 @@
 | **ABI compatibility** | Drop-in `libsqlite3.so` / `.dylib` / `.dll` replacement |
 | **Memory safety** | Eliminate all buffer overflows, use-after-free, and data races |
 | **No unsafe by default** | `unsafe` restricted to OS I/O, FFI boundaries, and performance-critical hot paths with documented invariants |
-| **Idiomatic Rust API** | Publish a `sqlite3-rs` crate with ergonomic, ownership-based API |
+| **Idiomatic Rust API** | Publish a `liter-rs` crate with ergonomic, ownership-based API |
 
 ### Non-Goals (v1.0)
 
@@ -99,12 +99,12 @@ Port the stateless, easily-testable utilities first.
 
 | Module | C files | Rust crate |
 |--------|---------|------------|
-| Memory allocator | `mem0–5.c`, `mem_malloc.c` | `sqlite3-alloc` |
-| Mutex / atomics | `mutex.c`, `mutex_unix.c` | `sqlite3-sync` |
-| UTF-8/16 codec | `utf.c` | `sqlite3-unicode` |
-| Printf / strftime | `printf.c`, `date.c` | `sqlite3-fmt` |
-| Hash tables | `hash.c` | (inline in `sqlite3-util`) |
-| Global config | `global.c`, `config.c` | `sqlite3-config` |
+| Memory allocator | `mem0–5.c`, `mem_malloc.c` | `liter-alloc` |
+| Mutex / atomics | `mutex.c`, `mutex_unix.c` | `liter-sync` |
+| UTF-8/16 codec | `utf.c` | `liter-unicode` |
+| Printf / strftime | `printf.c`, `date.c` | `liter-fmt` |
+| Hash tables | `hash.c` | (inline in `liter-util`) |
+| Global config | `global.c`, `config.c` | `liter-config` |
 
 ### Phase 2 — Storage Engine (Weeks 13–26)
 
@@ -112,31 +112,31 @@ The most critical and complex subsystem.
 
 | Module | C files | Rust crate |
 |--------|---------|------------|
-| VFS (Unix) | `os_unix.c` | `sqlite3-vfs-unix` |
-| VFS (Win32) | `os_win.c` | `sqlite3-vfs-win` |
-| VFS (in-memory) | `memdb.c` | `sqlite3-vfs-mem` |
-| Pager / WAL | `pager.c`, `wal.c` | `sqlite3-pager` |
-| B-Tree | `btree.c`, `btreeInt.h` | `sqlite3-btree` |
-| Record format | `record.c` | `sqlite3-record` |
+| VFS (Unix) | `os_unix.c` | `liter-vfs-unix` |
+| VFS (Win32) | `os_win.c` | `liter-vfs-win` |
+| VFS (in-memory) | `memdb.c` | `liter-vfs-mem` |
+| Pager / WAL | `pager.c`, `wal.c` | `liter-pager` |
+| B-Tree | `btree.c`, `btreeInt.h` | `liter-btree` |
+| Record format | `record.c` | `liter-record` |
 
 ### Phase 3 — Query Engine (Weeks 27–40)
 
 | Module | C files | Rust crate |
 |--------|---------|------------|
-| Tokenizer | `tokenize.c` | `sqlite3-tokenizer` |
-| Parser | `parse.y` (Lemon) | `sqlite3-parser` (hand-written recursive-descent or lalrpop) |
-| AST / Schema | `build.c`, `table.c`, etc. | `sqlite3-ast` |
-| Resolver | `resolve.c` | `sqlite3-resolve` |
-| Query optimizer | `where.c`, `whereInt.h` | `sqlite3-optimizer` |
-| Code generator | `select.c`, `insert.c`, `delete.c`, `update.c`, `trigger.c` | `sqlite3-codegen` |
-| VDBE | `vdbe.c`, `vdbeapi.c`, `vdbeaux.c`, `vdbemem.c`, `vdbesort.c`, `vdbeblob.c` | `sqlite3-vdbe` |
+| Tokenizer | `tokenize.c` | `liter-tokenizer` |
+| Parser | `parse.y` (Lemon) | `liter-parser` (hand-written recursive-descent or lalrpop) |
+| AST / Schema | `build.c`, `table.c`, etc. | `liter-ast` |
+| Resolver | `resolve.c` | `liter-resolve` |
+| Query optimizer | `where.c`, `whereInt.h` | `liter-optimizer` |
+| Code generator | `select.c`, `insert.c`, `delete.c`, `update.c`, `trigger.c` | `liter-codegen` |
+| VDBE | `vdbe.c`, `vdbeapi.c`, `vdbeaux.c`, `vdbemem.c`, `vdbesort.c`, `vdbeblob.c` | `liter-vdbe` |
 
 ### Phase 4 — C API Compatibility & Extensions (Weeks 41–52)
 
 | Task | Detail |
 |------|--------|
-| `sqlite3.h` FFI layer | `#[no_mangle]` extern "C" wrappers in `sqlite3-ffi` |
-| Built-in functions | `func.c`, `math.c` — ported to `sqlite3-functions` |
+| `sqlite3.h` FFI layer | `#[no_mangle]` extern "C" wrappers in `liter-ffi` |
+| Built-in functions | `func.c`, `math.c` — ported to `liter-functions` |
 | FTS5 | `fts5.c` family |
 | JSON1 | `json.c` |
 | R*Tree | `rtree.c` |
@@ -147,7 +147,7 @@ The most critical and complex subsystem.
 
 ## 4. Module-by-Module Porting Guide
 
-### 4.1 Memory Allocator (`sqlite3-alloc`)
+### 4.1 Memory Allocator (`liter-alloc`)
 
 **C behavior**: SQLite uses a pluggable allocator (`sqlite3_mem_methods`). It
 defaults to system `malloc` but can use a static buffer ("memsys3/5") or a
@@ -183,7 +183,7 @@ pub struct StaticAlloc<const N: usize> { buf: UnsafeCell<[u8; N]>, ... }
 
 ---
 
-### 4.2 VFS Layer (`sqlite3-vfs-unix`, `sqlite3-vfs-win`, `sqlite3-vfs-mem`)
+### 4.2 VFS Layer (`liter-vfs-unix`, `liter-vfs-win`, `liter-vfs-mem`)
 
 **C behavior**: The VFS provides `xOpen`, `xDelete`, `xAccess`, `xLock`,
 `xUnlock`, `xSync`, `xFileSize`, `xRead`, `xWrite`, `xTruncate`, `xClose`.
@@ -225,7 +225,7 @@ pub trait VfsFile: Send {
 
 ---
 
-### 4.3 Pager (`sqlite3-pager`)
+### 4.3 Pager (`liter-pager`)
 
 The pager is the most complex module (~6,000 LOC in C). It manages:
 
@@ -246,7 +246,7 @@ pub struct Pager {
     wal: Option<Wal>,
     lock_state: LockState,
     read_only: bool,
-    // ... ~40 more fields mirroring sqlite3_pager
+    // ... ~40 more fields mirroring liter_pager
 }
 
 impl Pager {
@@ -275,7 +275,7 @@ impl Pager {
 
 ---
 
-### 4.4 B-Tree (`sqlite3-btree`)
+### 4.4 B-Tree (`liter-btree`)
 
 **C behavior**: Implements both table B-trees (row-id keyed) and index B-trees
 (arbitrary key). Uses the pager for page management. Pages are either interior
@@ -322,7 +322,7 @@ impl BTreeCursor<'_> {
 
 ---
 
-### 4.5 VDBE (`sqlite3-vdbe`)
+### 4.5 VDBE (`liter-vdbe`)
 
 The VDBE is SQLite's bytecode virtual machine — roughly 200 opcodes.
 
@@ -365,7 +365,7 @@ impl Vdbe {
 
 ---
 
-### 4.6 Parser (`sqlite3-parser`)
+### 4.6 Parser (`liter-parser`)
 
 **C behavior**: SQLite uses the Lemon LALR(1) parser generator (`parse.y`,
 ~1,000 grammar rules) feeding into a hand-written tokenizer (`tokenize.c`).
@@ -414,33 +414,33 @@ pub enum Stmt {
 ## 5. Rust Crate Structure
 
 ```
-sqlite3-rs/                     (Cargo workspace root)
+liter-rs/                     (Cargo workspace root)
 ├── crates/
-│   ├── sqlite3-alloc/          # Memory allocation traits + implementations
-│   ├── sqlite3-sync/           # Mutex, condvar, atomic wrappers
-│   ├── sqlite3-unicode/        # UTF-8/16 encode/decode, case folding
-│   ├── sqlite3-fmt/            # printf / strftime implementations
-│   ├── sqlite3-config/         # Global configuration (sqlite3_config equivalent)
-│   ├── sqlite3-vfs/            # VFS trait definitions
-│   ├── sqlite3-vfs-unix/       # Unix VFS implementation
-│   ├── sqlite3-vfs-win/        # Windows VFS implementation
-│   ├── sqlite3-vfs-mem/        # In-memory VFS (tests + :memory: db)
-│   ├── sqlite3-pager/          # Page cache, WAL, rollback journal
-│   ├── sqlite3-btree/          # B-tree read/write/cursor
-│   ├── sqlite3-record/         # Record encoding/decoding
-│   ├── sqlite3-tokenizer/      # SQL tokenizer
-│   ├── sqlite3-parser/         # SQL parser → AST
-│   ├── sqlite3-ast/            # AST node types, schema representation
-│   ├── sqlite3-resolve/        # Name resolution, type affinity
-│   ├── sqlite3-optimizer/      # Query planner (WHERE analysis, index selection)
-│   ├── sqlite3-codegen/        # VDBE bytecode generation
-│   ├── sqlite3-vdbe/           # Virtual machine execution
-│   ├── sqlite3-functions/      # Built-in SQL functions
-│   ├── sqlite3-schema/         # Schema management, table/index catalog
-│   ├── sqlite3-ffi/            # #[no_mangle] C ABI compatibility layer
-│   ├── sqlite3-fts5/           # Full-text search (Phase 3)
-│   ├── sqlite3-json/           # JSON1 extension (Phase 3)
-│   ├── sqlite3-rtree/          # R*Tree extension (Phase 3)
+│   ├── liter-alloc/          # Memory allocation traits + implementations
+│   ├── liter-sync/           # Mutex, condvar, atomic wrappers
+│   ├── liter-unicode/        # UTF-8/16 encode/decode, case folding
+│   ├── liter-fmt/            # printf / strftime implementations
+│   ├── liter-config/         # Global configuration (liter_config equivalent)
+│   ├── liter-vfs/            # VFS trait definitions
+│   ├── liter-vfs-unix/       # Unix VFS implementation
+│   ├── liter-vfs-win/        # Windows VFS implementation
+│   ├── liter-vfs-mem/        # In-memory VFS (tests + :memory: db)
+│   ├── liter-pager/          # Page cache, WAL, rollback journal
+│   ├── liter-btree/          # B-tree read/write/cursor
+│   ├── liter-record/         # Record encoding/decoding
+│   ├── liter-tokenizer/      # SQL tokenizer
+│   ├── liter-parser/         # SQL parser → AST
+│   ├── liter-ast/            # AST node types, schema representation
+│   ├── liter-resolve/        # Name resolution, type affinity
+│   ├── liter-optimizer/      # Query planner (WHERE analysis, index selection)
+│   ├── liter-codegen/        # VDBE bytecode generation
+│   ├── liter-vdbe/           # Virtual machine execution
+│   ├── liter-functions/      # Built-in SQL functions
+│   ├── liter-schema/         # Schema management, table/index catalog
+│   ├── liter-ffi/            # #[no_mangle] C ABI compatibility layer
+│   ├── liter-fts5/           # Full-text search (Phase 3)
+│   ├── liter-json/           # JSON1 extension (Phase 3)
+│   ├── liter-rtree/          # R*Tree extension (Phase 3)
 │   └── sqlite3/                # Unified facade crate (public Rust API)
 ├── fuzz/
 │   ├── fuzz_tokenizer/
@@ -460,7 +460,7 @@ sqlite3-rs/                     (Cargo workspace root)
 │   ├── tcl_suite/              # Wrapper that runs the official TCL tests
 │   └── oom/                    # Out-of-memory injection tests
 └── tools/
-    ├── sqlite3-shell/          # Rust port of the sqlite3 shell
+    ├── liter-shell/          # Rust port of the sqlite3 shell
     └── lemon-to-rust/          # Optional: Lemon .y → LALR table generator
 ```
 
@@ -468,12 +468,12 @@ sqlite3-rs/                     (Cargo workspace root)
 
 ## 6. C API Compatibility Layer
 
-The `sqlite3-ffi` crate exports the full `sqlite3.h` surface as `extern "C"` symbols, enabling drop-in replacement.
+The `liter-ffi` crate exports the full `sqlite3.h` surface as `extern "C"` symbols, enabling drop-in replacement.
 
 ```rust
-// sqlite3-ffi/src/lib.rs
+// liter-ffi/src/lib.rs
 
-use sqlite3::Connection;
+use liter::Connection;
 use std::ffi::{CStr, c_char, c_int, c_void};
 
 /// Opaque handle — the public sqlite3* pointer
@@ -505,7 +505,7 @@ pub unsafe extern "C" fn sqlite3_close(db: *mut sqlite3) -> c_int {
 // ... all ~250 public API functions
 ```
 
-**Verification**: The `sqlite3-ffi` crate is tested by:
+**Verification**: The `liter-ffi` crate is tested by:
 1. Compiling a set of C programs (from the official test suite) against our `.so`.
 2. Running the Python `sqlite3` module's test suite via ctypes-level shim.
 3. Running the Ruby `sqlite3` gem tests.
@@ -540,7 +540,7 @@ pub unsafe extern "C" fn sqlite3_close(db: *mut sqlite3) -> c_int {
 ```rust
 // tests/differential/src/lib.rs
 use rusqlite::Connection as CConn;   // links against C SQLite
-use sqlite3::Connection as RConn;    // our Rust implementation
+use liter::Connection as RConn;    // our Rust implementation
 
 pub fn diff_exec(sql: &str, params: &[Value]) {
     let c_conn = CConn::open_in_memory().unwrap();
@@ -634,7 +634,7 @@ fn open_reference_database() {
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-sqlite3 = { path = "../crates/sqlite3" }
+liter = { path = "../crates/sqlite3" }
 ```
 
 ### 7.7 Miri Tests
@@ -642,10 +642,10 @@ sqlite3 = { path = "../crates/sqlite3" }
 Run safety-critical modules under Miri to catch undefined behavior:
 
 ```bash
-cargo +nightly miri test -p sqlite3-alloc
-cargo +nightly miri test -p sqlite3-unicode
-cargo +nightly miri test -p sqlite3-record
-cargo +nightly miri test -p sqlite3-vdbe -- --test-threads=1
+cargo +nightly miri test -p liter-alloc
+cargo +nightly miri test -p liter-unicode
+cargo +nightly miri test -p liter-record
+cargo +nightly miri test -p liter-vdbe -- --test-threads=1
 ```
 
 ---
@@ -735,7 +735,7 @@ jobs:
   miri:
     runs-on: ubuntu-latest
     steps:
-      - run: cargo +nightly miri test -p sqlite3-alloc -p sqlite3-unicode -p sqlite3-record
+      - run: cargo +nightly miri test -p liter-alloc -p liter-unicode -p liter-record
 
   fuzz:
     runs-on: ubuntu-latest
@@ -754,7 +754,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo apt-get install -y tcl
-      - run: cargo test -p sqlite3-tcl-suite -- --nocapture
+      - run: cargo test -p liter-tcl-suite -- --nocapture
 
   audit:
     runs-on: ubuntu-latest
@@ -792,7 +792,7 @@ cargo llvm-cov --workspace --html --open
 | Week | Milestone | Deliverable |
 |------|-----------|-------------|
 | 4 | Foundation complete | CI green, differential harness running |
-| 8 | Utilities ported | `sqlite3-alloc`, `sqlite3-sync`, `sqlite3-unicode` passing unit + fuzz tests |
+| 8 | Utilities ported | `liter-alloc`, `liter-sync`, `liter-unicode` passing unit + fuzz tests |
 | 12 | VFS layer complete | Unix + in-memory VFS, all lock mode tests passing |
 | 18 | Pager complete | WAL + rollback journal, crash-recovery tests passing |
 | 26 | Storage engine complete | B-tree passing format-compat tests against C SQLite files |

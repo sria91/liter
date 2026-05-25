@@ -3,7 +3,7 @@
 //! Runs the same SQL against both C SQLite (via `rusqlite`) and our Rust
 //! implementation simultaneously, then diffs the results.
 
-use sqlite3::{Connection as RConn, Value};
+use liter::{Connection as RConn, Value};
 
 /// Run a SQL statement against both implementations and assert equal results.
 /// 

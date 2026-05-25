@@ -1,0 +1,11 @@
+[package]
+name = "liter-vfs-mem"
+description = "Liter-rs: in-memory VFS (for :memory: databases and tests)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-vfs = { path = "../liter-vfs" }
+thiserror.workspace = true
+parking_lot.workspace = true

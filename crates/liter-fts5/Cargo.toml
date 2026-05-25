@@ -1,0 +1,10 @@
+[package]
+name = "liter-fts5"
+description = "Liter-rs: Full-Text Search (FTS5) extension (Phase 3)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter = { path = "../liter" }
+thiserror.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "liter-pager"
+description = "Liter-rs: page cache, WAL, and rollback journal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-vfs = { path = "../liter-vfs" }
+liter-alloc = { path = "../liter-alloc" }
+liter-sync = { path = "../liter-sync" }
+thiserror.workspace = true
+parking_lot.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

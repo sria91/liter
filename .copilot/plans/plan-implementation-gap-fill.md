@@ -1,4 +1,4 @@
-# sqlite3-rs: Gap Fill Implementation Plan
+# liter-rs: Gap Fill Implementation Plan
 
 ## Background
 
@@ -14,18 +14,18 @@ is ordered by dependency — each phase unblocks the next.
 > **This is the single highest-priority phase.** Nothing useful can be queried
 > until these opcodes exist.
 
-### What must exist in `sqlite3-btree` first
+### What must exist in `liter-btree` first
 
 The BTree cursor already has `move_to_first`, `next`, `key`, `data`, `is_valid`.
 We need one extra helper:
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-btree/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-btree/src/lib.rs)
 - Add `pub fn rowid(&self) -> BTreeResult<i64>` — decodes the current key's 8 bytes as a big-endian `u64`, reinterprets as `i64`.
 - Add `pub fn max_rowid(&self) -> BTreeResult<i64>` — traverses to last leaf, reads rowid (used by `NewRowid`; already similar to `move_to_last`).
 
 ### New VDBE opcodes to implement in `step()`
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-vdbe/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-vdbe/src/lib.rs)
 
 | Opcode | Semantics | Operands |
 |--------|-----------|----------|
@@ -42,13 +42,13 @@ We need one extra helper:
 | `IsNull` | Jump to `p2` if register `p1` is `Mem::Null`. | p1=reg, p2=jump_addr |
 | `NotNull` | Jump to `p2` if register `p1` is not `Mem::Null`. | p1=reg, p2=jump_addr |
 
-**The `Column` opcode** is the most important. It must call `sqlite3_record::decode_record` on `cursor.data()`, then index into the resulting `Vec<Value>` at position `p2`, converting `record::Value` → `vdbe::Mem`.
+**The `Column` opcode** is the most important. It must call `liter_record::decode_record` on `cursor.data()`, then index into the resulting `Vec<Value>` at position `p2`, converting `record::Value` → `vdbe::Mem`.
 
 Add to `Opcode` enum: `If`, `IfNot`, `IsNull`, `NotNull` (already have `OpenRead`, `Rewind`, `Next`, `Prev`, `Last`, `Column`, `Rowid`, `NullRow` declared — just need `step()` arms).
 
 ### Tests
 
-Add to `crates/sqlite3-vdbe/tests/vdbe_tests.rs`:
+Add to `crates/liter-vdbe/tests/vdbe_tests.rs`:
 - `test_open_read_rewind_next_column` — hand-assemble a program that opens a btree, rewinds, loops with `Next`, reads `Column` into a register, yields `ResultRow`. Use a pre-populated in-memory BTree.
 - `test_if_ifnot_isnull` — exercise the new branching opcodes.
 
@@ -60,7 +60,7 @@ Add to `crates/sqlite3-vdbe/tests/vdbe_tests.rs`:
 
 ### Codegen changes
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-codegen/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-codegen/src/lib.rs)
 
 **Remove the `from.is_some()` rejection guard** in `compile_select`.
 
@@ -99,7 +99,7 @@ compile_select_with_from(table_name, result_cols, where_expr):
 
 ### Tests
 
-Add to `crates/sqlite3-codegen/tests/codegen_tests.rs`:
+Add to `crates/liter-codegen/tests/codegen_tests.rs`:
 - `test_compile_select_from` — compile `SELECT id, name FROM users`, verify opcode sequence contains `OpenRead`, `Rewind`, `Column`, `ResultRow`, `Next`.
 - `test_compile_select_where` — compile `SELECT * FROM t WHERE id = 1`, verify `IfNot` skip logic.
 
@@ -109,7 +109,7 @@ Add to `crates/sqlite3-codegen/tests/codegen_tests.rs`:
 
 ### Connection wiring
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/sqlite3/src/lib.rs)
 
 - `Connection::query` already passes cursors to `Vdbe::step`. The only change needed is that `SELECT FROM` queries don't need `begin_write` — keep `execute` for mutating statements and `query` for read-only.
 - Add `begin_read` / `end_read` transaction brackets in `query` (currently none; needed for snapshot isolation consistency).
@@ -117,8 +117,8 @@ Add to `crates/sqlite3-codegen/tests/codegen_tests.rs`:
 **Implement `Connection::prepare`**:
 ```rust
 pub fn prepare<'c>(&'c self, sql: &str) -> SqliteResult<Statement<'c>> {
-    let ast = sqlite3_parser::parse_stmt(sql)?;
-    let vm = sqlite3_codegen::compile_with_schema(&ast, &self.schema)?;
+    let ast = liter_parser::parse_stmt(sql)?;
+    let vm = liter_codegen::compile_with_schema(&ast, &self.schema)?;
     let n = vm.n_cursors;
     Ok(Statement {
         conn: self,
@@ -179,7 +179,7 @@ fn test_select_from_table() {
 
 ### Parser additions
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-parser/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-parser/src/lib.rs)
 - `parse_delete_stmt` — `DELETE FROM table [WHERE expr]` (body already in AST)
 - `parse_update_stmt` — `UPDATE table SET col = expr [WHERE expr]`
 - `parse_transaction_stmt` — `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE]`, `COMMIT`, `ROLLBACK [TO SAVEPOINT name]`
@@ -187,19 +187,19 @@ fn test_select_from_table() {
 
 ### VDBE opcodes for mutation
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-vdbe/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-vdbe/src/lib.rs)
 - `Delete` — calls `cursor.delete()` at current position. Already declared in enum.
 - `SeekGe/SeekGt/SeekLe/SeekLt` — calls `cursor.move_to(key, SeekBias::*)`, jumps if not found.
 
 ### Codegen
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-codegen/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-codegen/src/lib.rs)
 - `compile_delete` — `OpenWrite` → `Rewind` → loop: `[WHERE check]` → `Delete` → `Next`
 - `compile_update` — `OpenWrite` → `Rewind` → loop: `[WHERE check]` → read old row → `MakeRecord` with new values → `Insert` at same rowid → `Next`
 
 ### Connection wiring
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/sqlite3/src/lib.rs)
 - Handle `Stmt::Begin`, `Stmt::Commit`, `Stmt::Rollback` in `execute` by calling `btree.begin_write()`, `btree.commit()`, `btree.rollback()`.
 - Track transaction state in `Connection` to prevent double-begin.
 
@@ -211,14 +211,14 @@ fn test_select_from_table() {
 
 This requires a temporary sort buffer. SQLite uses an ephemeral B-tree (the `OpenEphemeral` + `SorterOpen` opcodes). Minimal approach:
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-vdbe/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-vdbe/src/lib.rs)
 - Add `SorterOpen` — creates an in-memory `Vec<(sort_key_bytes, record_bytes)>` sort buffer
 - Add `SorterInsert` — appends current row to the sort buffer
 - Add `SorterSort` — sorts the buffer (stable sort)
 - Add `SorterData` — copies next row from sorted buffer to registers
 - Add `SorterNext` — advances sort cursor
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-codegen/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-codegen/src/lib.rs)
 - `compile_order_by` — append a sorter phase after the scan loop:
   `SorterOpen` → scan + `SorterInsert` → `SorterSort` → yield loop with `SorterData` + `ResultRow` + `SorterNext`
 
@@ -230,15 +230,15 @@ Add `Limit` opcode — decrements a counter register; jumps to end when zero.
 
 ### Built-in Functions in VDBE
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-vdbe/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-vdbe/src/lib.rs)
 - Implement `Function` opcode:
   - `p4 = P4::FuncDef(name)` — look up in a static function dispatch table
   - Read `p2` arguments from registers `[p3 .. p3+p2]`, write result to `p1`
-  - Dispatch to `sqlite3_functions::{func_abs, func_length, ...}`
+  - Dispatch to `liter_functions::{func_abs, func_length, ...}`
 
 #### [MODIFY] codegen — emit `Function` opcode for `Expr::Function` nodes.
 
-Add missing built-in functions to `sqlite3-functions`:
+Add missing built-in functions to `liter-functions`:
 - `count`, `sum`, `avg` (aggregate)  
 - `substr`, `replace`, `trim`, `ltrim`, `rtrim`
 - `hex`, `quote`, `zeroblob`
@@ -253,7 +253,7 @@ Add missing built-in functions to `sqlite3-functions`:
 
 ### VDBE aggregate opcodes
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-vdbe/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-vdbe/src/lib.rs)
 - Implement `AggStep` — accumulate a value into an aggregate accumulator register
   - `p4 = P4::FuncDef("count"|"sum"|"avg"|"min"|"max")`
   - Reads `p2` args from register `p3`, updates accumulator at `p1`
@@ -261,7 +261,7 @@ Add missing built-in functions to `sqlite3-functions`:
 
 ### Codegen for aggregates
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-codegen/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-codegen/src/lib.rs)
 - Detect aggregate functions in result columns
 - Emit: scan loop → `AggStep` per aggregate → `AggFinal` → `ResultRow`
 - For `GROUP BY`: use ephemeral B-tree (key = group-by key bytes, value = accumulator)
@@ -271,9 +271,9 @@ Add missing built-in functions to `sqlite3-functions`:
 
 ## Phase 13 — C FFI Layer Completion
 
-### sqlite3-ffi
+### liter-ffi
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/crates/sqlite3-ffi/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/crates/liter-ffi/src/lib.rs)
 
 The `Statement` type from Phase 9 makes the rest of these trivial to implement:
 
@@ -306,7 +306,7 @@ The `Statement` type from Phase 9 makes the rest of these trivial to implement:
 
 ### Differential Harness (activate)
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/tests/differential/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/tests/differential/src/lib.rs)
 - Enable `feature = "differential"` by default in `Cargo.toml`
 - Add real differential tests:
   ```rust
@@ -322,14 +322,14 @@ The `Statement` type from Phase 9 makes the rest of these trivial to implement:
 
 ### Format Compatibility Tests
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/tests/format_compat/src/lib.rs)
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/tests/format_compat/src/lib.rs)
 - Download / commit a small reference `.db` file created by C SQLite (e.g., a Chinook subset)
 - Add test: `open_and_read_reference_db` using `Connection::open(path)`
 
 ### OOM Injection
 
-#### [MODIFY] [lib.rs](file:///Users/sri/Developer/sqlite3-rs/tests/oom/src/lib.rs)
-- Wire counting allocator wrapper in `sqlite3-alloc`
+#### [MODIFY] [lib.rs](file:///Users/sri/Developer/liter-rs/tests/oom/src/lib.rs)
+- Wire counting allocator wrapper in `liter-alloc`
 - Run key operations with decreasing allocation budget; verify `Err(NoMem)` not panic
 
 ### Fuzz Targets
@@ -352,7 +352,7 @@ jobs:
   test:     cargo test --workspace --all-features
   clippy:   cargo clippy --workspace -- -D warnings
   fmt:      cargo fmt --check
-  miri:     cargo +nightly miri test -p sqlite3-alloc -p sqlite3-record
+  miri:     cargo +nightly miri test -p liter-alloc -p liter-record
   fuzz:     cargo fuzz run fuzz_parser -- -max_total_time=60
   audit:    cargo audit
 ```
@@ -361,21 +361,21 @@ jobs:
 
 ## Phase 15 — Extensions (Phase 4 Scope)
 
-### `sqlite3-functions` completion
+### `liter-functions` completion
 - Add `count(*)`/`sum`/`avg` aggregates
 - Add all string functions (`substr`, `replace`, `trim`, `printf`, etc.)
 - Add date/time functions using system clock + `strftime`
 
-### `sqlite3-json`
+### `liter-json`
 - Complete `json()`, `json_extract()`, `json_object()`, `json_array()`, `json_each()` table-valued function
 
-### `sqlite3-fts5`
+### `liter-fts5`
 - Full-text search tokenizer, inverted index, `MATCH` operator plumbing
 
-### `sqlite3-rtree`
+### `liter-rtree`
 - 2D R-tree, `rtree` virtual table, spatial queries
 
-### `sqlite3-session`
+### `liter-session`
 - Session/changeset recording API (`sqlite3session_*`)
 
 ---

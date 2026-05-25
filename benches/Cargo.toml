@@ -22,4 +22,4 @@ harness = false
 
 [dev-dependencies]
 criterion = { workspace = true }
-sqlite3 = { path = "../crates/sqlite3" }
+liter = { path = "../crates/liter" }

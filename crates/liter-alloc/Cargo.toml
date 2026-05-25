@@ -1,0 +1,9 @@
+[package]
+name = "liter-alloc"
+description = "Liter-rs: memory allocation traits and implementations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true

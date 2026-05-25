@@ -1,4 +1,4 @@
-use sqlite3::{Connection, Value};
+use liter::{Connection, Value};
 
 #[test]
 fn test_simple_aggregate() {

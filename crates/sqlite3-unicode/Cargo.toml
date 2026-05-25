@@ -1,9 +1,0 @@
-[package]
-name = "sqlite3-unicode"
-description = "SQLite3-rs: UTF-8/16 encode/decode and case folding"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-thiserror.workspace = true

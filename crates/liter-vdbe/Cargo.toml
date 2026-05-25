@@ -1,0 +1,11 @@
+[package]
+name = "liter-vdbe"
+description = "Liter-rs: Virtual Database Engine (bytecode VM)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-record = { path = "../liter-record" }
+liter-btree = { path = "../liter-btree" }
+thiserror.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "liter-config"
+description = "Liter-rs: global configuration (liter_config equivalent)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+parking_lot.workspace = true
+liter-alloc = { path = "../liter-alloc" }
+liter-sync = { path = "../liter-sync" }

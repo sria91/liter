@@ -1,0 +1,15 @@
+[package]
+name = "liter-btree"
+description = "Liter-rs: B-tree read/write/cursor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-pager = { path = "../liter-pager" }
+liter-record = { path = "../liter-record" }
+liter-vfs = { path = "../liter-vfs" }
+thiserror.workspace = true
+arrayvec.workspace = true
+parking_lot.workspace = true
+tempfile.workspace = true

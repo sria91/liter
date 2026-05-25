@@ -1,0 +1,14 @@
+[package]
+name = "liter-resolve"
+description = "Liter-rs: name resolution and type affinity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-ast = { path = "../liter-ast" }
+liter-schema = { path = "../liter-schema" }
+thiserror.workspace = true
+
+[dev-dependencies]
+liter-parser = { path = "../liter-parser" }

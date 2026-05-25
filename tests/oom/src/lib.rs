@@ -15,12 +15,12 @@ static ALLOC_FAIL_AFTER: AtomicUsize = AtomicUsize::new(0);
 /// paths are reachable).
 pub fn oom_test<F>(mut f: F)
 where
-    F: FnMut() -> Result<(), sqlite3::SqliteError>,
+    F: FnMut() -> Result<(), liter::SqliteError>,
 {
     for limit in 1..=10_000 {
         ALLOC_FAIL_AFTER.store(limit, Ordering::SeqCst);
         match f() {
-            Err(sqlite3::SqliteError::NoMem) => continue,
+            Err(liter::SqliteError::NoMem) => continue,
             Err(e) => panic!("Unexpected error at alloc limit {limit}: {e}"),
             Ok(()) => {
                 // All allocation sites passed — done.

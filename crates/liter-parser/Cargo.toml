@@ -1,0 +1,11 @@
+[package]
+name = "liter-parser"
+description = "Liter-rs: SQL parser producing an AST"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-tokenizer = { path = "../liter-tokenizer" }
+liter-ast = { path = "../liter-ast" }
+thiserror.workspace = true

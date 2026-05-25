@@ -1,0 +1,15 @@
+[package]
+name = "liter-optimizer"
+description = "Liter-rs: query planner (WHERE analysis, index selection)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-ast = { path = "../liter-ast" }
+liter-schema = { path = "../liter-schema" }
+thiserror.workspace = true
+
+[dev-dependencies]
+liter-parser = { path = "../liter-parser" }
+liter-resolve = { path = "../liter-resolve" }

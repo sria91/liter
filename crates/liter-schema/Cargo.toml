@@ -1,0 +1,11 @@
+[package]
+name = "liter-schema"
+description = "Liter-rs: schema management, table/index catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-ast = { path = "../liter-ast" }
+thiserror.workspace = true
+parking_lot.workspace = true

@@ -1,0 +1,34 @@
+[package]
+name = "liter"
+description = "Liter-rs: unified Rust API facade (SQLite 3.53.x reimplementation)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-alloc = { path = "../liter-alloc" }
+liter-sync = { path = "../liter-sync" }
+liter-unicode = { path = "../liter-unicode" }
+liter-config = { path = "../liter-config" }
+liter-vfs-mem = { path = "../liter-vfs-mem" }
+liter-pager = { path = "../liter-pager" }
+liter-btree = { path = "../liter-btree" }
+liter-record = { path = "../liter-record" }
+liter-schema = { path = "../liter-schema" }
+liter-ast = { path = "../liter-ast" }
+liter-tokenizer = { path = "../liter-tokenizer" }
+liter-parser = { path = "../liter-parser" }
+liter-codegen = { path = "../liter-codegen" }
+liter-vdbe = { path = "../liter-vdbe" }
+liter-functions = { path = "../liter-functions" }
+thiserror.workspace = true
+parking_lot.workspace = true
+liter-json = { version = "0.1.0", path = "../liter-json" }
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2.92", optional = true }
+getrandom = { version = "0.2", features = ["js"] }

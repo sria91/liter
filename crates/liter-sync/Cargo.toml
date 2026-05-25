@@ -1,0 +1,10 @@
+[package]
+name = "liter-sync"
+description = "Liter-rs: mutex, condvar, and atomic wrappers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+parking_lot.workspace = true
+thiserror.workspace = true

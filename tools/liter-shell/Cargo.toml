@@ -1,0 +1,13 @@
+[package]
+name = "liter-shell"
+description = "Liter-rs: interactive command-line shell (port of sqlite3 CLI)"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "liter-shell"
+path = "src/main.rs"
+
+[dependencies]
+liter = { path = "../../crates/liter" }

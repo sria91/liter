@@ -1,0 +1,12 @@
+[package]
+name = "liter-functions"
+description = "Liter-rs: built-in SQL functions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-vdbe = { path = "../liter-vdbe" }
+liter-record = { path = "../liter-record" }
+thiserror.workspace = true
+chrono = "0.4.44"

@@ -9,7 +9,7 @@ fn bench_speedtest1(c: &mut Criterion) {
     c.bench_function("speedtest1_placeholder", |b| {
         b.iter(|| {
             // TODO: wire up once Connection::execute is implemented.
-            let _ = sqlite3::Connection::open_in_memory();
+            let _ = liter::Connection::open_in_memory();
         })
     });
 }

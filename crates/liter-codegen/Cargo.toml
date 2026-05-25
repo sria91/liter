@@ -1,0 +1,17 @@
+[package]
+name = "liter-codegen"
+description = "Liter-rs: VDBE bytecode generator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+liter-ast = { path = "../liter-ast" }
+liter-schema = { path = "../liter-schema" }
+liter-optimizer = { path = "../liter-optimizer" }
+liter-vdbe = { path = "../liter-vdbe" }
+thiserror.workspace = true
+
+[dev-dependencies]
+liter-parser = { path = "../liter-parser" }
+liter-btree = { path = "../liter-btree" }

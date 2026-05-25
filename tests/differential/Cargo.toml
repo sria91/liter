@@ -9,5 +9,5 @@ publish = false
 differential = ["rusqlite"]
 
 [dependencies]
-sqlite3 = { path = "../../crates/sqlite3" }
+liter = { path = "../../crates/liter" }
 rusqlite = { workspace = true, optional = true }
