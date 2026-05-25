@@ -43,20 +43,29 @@ fn test_exec_stub() {
 }
 
 #[test]
-fn test_prepare_stub() {
+fn test_prepare_and_step() {
     unsafe {
         let mut db: *mut sqlite3 = ptr::null_mut();
         let path = CString::new(":memory:").unwrap();
         sqlite3_open(path.as_ptr(), &mut db);
         
-        let sql = CString::new("SELECT 1;").unwrap();
+        let sql = CString::new("SELECT 42;").unwrap();
         let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
         
-        // sqlite3_crate currently returns NotImplemented for prepare, which maps to SQLITE_ERROR
         let rc = sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
-        assert_eq!(rc, SQLITE_ERROR);
-        assert!(stmt.is_null()); // stmt shouldn't be allocated on error
+        assert_eq!(rc, SQLITE_OK);
+        assert!(!stmt.is_null());
         
+        let rc = sqlite3_step(stmt);
+        assert_eq!(rc, SQLITE_ROW);
+        
+        let val = sqlite3_column_int64(stmt, 0);
+        assert_eq!(val, 42);
+        
+        let rc = sqlite3_step(stmt);
+        assert_eq!(rc, SQLITE_DONE);
+        
+        sqlite3_finalize(stmt);
         sqlite3_close(db);
     }
 }

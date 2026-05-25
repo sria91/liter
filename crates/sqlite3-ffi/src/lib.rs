@@ -7,8 +7,8 @@
 //! Phase 4 — skeleton with SQLITE_* constants and `sqlite3_open` / `sqlite3_close`
 //! stubs. Full implementation follows once the Rust API in `sqlite3` crate is stable.
 
-use std::ffi::{CStr, c_char, c_int, c_void};
-use sqlite3_crate::{Connection, SqliteError};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use sqlite3_crate::{Connection, SqliteError, Statement, Value};
 
 // ── SQLITE_* result codes ─────────────────────────────────────────────────────
 pub const SQLITE_OK:         c_int = 0;
@@ -43,13 +43,23 @@ pub const SQLITE_WARNING:    c_int = 28;
 pub const SQLITE_ROW:        c_int = 100;
 pub const SQLITE_DONE:       c_int = 101;
 
+// ── SQLITE_* data types ───────────────────────────────────────────────────────
+pub const SQLITE_INTEGER:    c_int = 1;
+pub const SQLITE_FLOAT:      c_int = 2;
+pub const SQLITE_TEXT:       c_int = 3;
+pub const SQLITE_BLOB:       c_int = 4;
+pub const SQLITE_NULL:       c_int = 5;
+
 /// Opaque database connection handle (`sqlite3*` in C).
 #[allow(non_camel_case_types)]
 pub struct sqlite3(Connection);
 
 /// Opaque prepared statement handle (`sqlite3_stmt*` in C).
 #[allow(non_camel_case_types)]
-pub struct sqlite3_stmt;
+pub struct sqlite3_stmt {
+    stmt: Statement<'static>,
+    text_cache: std::collections::HashMap<usize, CString>,
+}
 
 pub type Sqlite3Callback = Option<
     unsafe extern "C" fn(
@@ -146,10 +156,17 @@ pub unsafe extern "C" fn sqlite3_prepare_v2(
     let sql_str = CStr::from_ptr(z_sql).to_string_lossy();
     
     match conn.prepare(&sql_str) {
-        Ok(_stmt) => {
-            // We would allocate the statement on the heap here. 
-            // For now, prepare always returns NotImplemented so this isn't hit.
-            SQLITE_ERROR
+        Ok(stmt) => {
+            // Transmute the lifetime of the statement to 'static.
+            // SQLite API documentation dictates that prepared statements must be finalized
+            // before the connection is closed, so the Connection outlives the Statement.
+            let stmt: Statement<'static> = std::mem::transmute(stmt);
+            let s = Box::new(sqlite3_stmt {
+                stmt,
+                text_cache: std::collections::HashMap::new(),
+            });
+            *pp_stmt = Box::into_raw(s);
+            SQLITE_OK
         }
         Err(e) => map_err(e),
     }
@@ -160,31 +177,194 @@ pub unsafe extern "C" fn sqlite3_step(stmt: *mut sqlite3_stmt) -> c_int {
     if stmt.is_null() {
         return SQLITE_MISUSE;
     }
-    // Stub
-    SQLITE_ERROR
+    
+    let stmt_ref = &mut *stmt;
+    stmt_ref.text_cache.clear();
+    
+    match stmt_ref.stmt.step() {
+        Ok(sqlite3_crate::StepResult::Row) => SQLITE_ROW,
+        Ok(sqlite3_crate::StepResult::Done) => SQLITE_DONE,
+        Err(e) => map_err(e),
+    }
 }
-
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_reset(stmt: *mut sqlite3_stmt) -> c_int {
+    if stmt.is_null() {
+        return SQLITE_MISUSE;
+    }
+    
+    let stmt_ref = &mut *stmt;
+    stmt_ref.text_cache.clear();
+    
+    match stmt_ref.stmt.reset() {
+        Ok(()) => SQLITE_OK,
+        Err(e) => map_err(e),
+    }
+}
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_finalize(stmt: *mut sqlite3_stmt) -> c_int {
     if !stmt.is_null() {
-        // drop(Box::from_raw(stmt));
+        drop(Box::from_raw(stmt));
     }
     SQLITE_OK
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn sqlite3_column_int64(_stmt: *mut sqlite3_stmt, _i_col: c_int) -> i64 {
-    0
+pub unsafe extern "C" fn sqlite3_column_int64(stmt: *mut sqlite3_stmt, i_col: c_int) -> i64 {
+    if stmt.is_null() { return 0; }
+    let stmt_ref = &*stmt;
+    match stmt_ref.stmt.column_value(i_col as usize) {
+        Ok(Value::Int(i)) => i,
+        Ok(Value::Real(f)) => f as i64,
+        _ => 0,
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn sqlite3_column_text(_stmt: *mut sqlite3_stmt, _i_col: c_int) -> *const c_char {
-    std::ptr::null()
+pub unsafe extern "C" fn sqlite3_column_double(stmt: *mut sqlite3_stmt, i_col: c_int) -> f64 {
+    if stmt.is_null() { return 0.0; }
+    let stmt_ref = &*stmt;
+    match stmt_ref.stmt.column_value(i_col as usize) {
+        Ok(Value::Real(f)) => f,
+        Ok(Value::Int(i)) => i as f64,
+        _ => 0.0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_column_text(stmt: *mut sqlite3_stmt, i_col: c_int) -> *const c_char {
+    if stmt.is_null() { return std::ptr::null(); }
+    let stmt_ref = &mut *stmt;
+    let idx = i_col as usize;
+    
+    if let Some(cstr) = stmt_ref.text_cache.get(&idx) {
+        return cstr.as_ptr();
+    }
+    
+    match stmt_ref.stmt.column_value(idx) {
+        Ok(Value::Text(t)) => {
+            if let Ok(cstr) = CString::new(t) {
+                let ptr = cstr.as_ptr();
+                stmt_ref.text_cache.insert(idx, cstr);
+                ptr
+            } else {
+                std::ptr::null()
+            }
+        }
+        Ok(Value::Int(i)) => {
+            let s = i.to_string();
+            let cstr = CString::new(s).unwrap();
+            let ptr = cstr.as_ptr();
+            stmt_ref.text_cache.insert(idx, cstr);
+            ptr
+        }
+        Ok(Value::Real(f)) => {
+            let s = f.to_string();
+            let cstr = CString::new(s).unwrap();
+            let ptr = cstr.as_ptr();
+            stmt_ref.text_cache.insert(idx, cstr);
+            ptr
+        }
+        _ => std::ptr::null(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_column_type(stmt: *mut sqlite3_stmt, i_col: c_int) -> c_int {
+    if stmt.is_null() { return 0; }
+    let stmt_ref = &*stmt;
+    match stmt_ref.stmt.column_value(i_col as usize) {
+        Ok(Value::Int(_)) => SQLITE_INTEGER,
+        Ok(Value::Real(_)) => SQLITE_FLOAT,
+        Ok(Value::Text(_)) => SQLITE_TEXT,
+        Ok(Value::Blob(_)) => SQLITE_BLOB,
+        Ok(Value::Null) => SQLITE_NULL,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_column_bytes(stmt: *mut sqlite3_stmt, i_col: c_int) -> c_int {
+    if stmt.is_null() { return 0; }
+    let stmt_ref = &*stmt;
+    match stmt_ref.stmt.column_value(i_col as usize) {
+        Ok(Value::Text(t)) => t.len() as c_int,
+        Ok(Value::Blob(b)) => b.len() as c_int,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_column_count(stmt: *mut sqlite3_stmt) -> c_int {
+    if stmt.is_null() { return 0; }
+    let stmt_ref = &*stmt;
+    stmt_ref.stmt.column_count() as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_column_name(_stmt: *mut sqlite3_stmt, _n: c_int) -> *const c_char {
+    // Currently, our Statement does not expose column names.
+    // Returning an empty string literal.
+    b"\0".as_ptr() as *const c_char
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_errmsg(_db: *mut sqlite3) -> *const c_char {
     b"not implemented\0".as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_changes(_db: *mut sqlite3) -> c_int {
+    0 // Stub: connection does not track changes yet
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_last_insert_rowid(_db: *mut sqlite3) -> i64 {
+    0 // Stub: connection does not track last rowid yet
+}
+
+// ── Bind Parameters (Stubs) ───────────────────────────────────────────────────
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_bind_parameter_count(_stmt: *mut sqlite3_stmt) -> c_int {
+    0 // Parameter binding not implemented
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_bind_int64(_stmt: *mut sqlite3_stmt, _i: c_int, _val: i64) -> c_int {
+    SQLITE_ERROR
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_bind_double(_stmt: *mut sqlite3_stmt, _i: c_int, _val: f64) -> c_int {
+    SQLITE_ERROR
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_bind_null(_stmt: *mut sqlite3_stmt, _i: c_int) -> c_int {
+    SQLITE_ERROR
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_bind_text(
+    _stmt: *mut sqlite3_stmt,
+    _i: c_int,
+    _data: *const c_char,
+    _n: c_int,
+    _destroy: Option<unsafe extern "C" fn(*mut c_void)>
+) -> c_int {
+    SQLITE_ERROR
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_bind_blob(
+    _stmt: *mut sqlite3_stmt,
+    _i: c_int,
+    _data: *const c_void,
+    _n: c_int,
+    _destroy: Option<unsafe extern "C" fn(*mut c_void)>
+) -> c_int {
+    SQLITE_ERROR
 }
 
 #[no_mangle]
