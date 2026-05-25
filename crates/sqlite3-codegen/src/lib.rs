@@ -92,12 +92,18 @@ impl<'a> Compiler<'a> {
     }
 
     /// Compile a `SELECT` with no `FROM` clause (pure expression projection).
-    fn compile_select_literal(&mut self, select: &SelectStmt, body: &SimpleSelect) -> CodegenResult<()> {
+    fn compile_select_literal(&mut self, _select: &SelectStmt, body: &SimpleSelect) -> CodegenResult<()> {
         let num_cols = body.result_columns.len();
         let result_reg_start = self.vm.alloc_reg();
         for _ in 1..num_cols {
             self.vm.alloc_reg();
         }
+
+        let skip_jumps = if let Some(where_expr) = &body.where_ {
+            self.compile_where_expr(where_expr, None)?
+        } else {
+            Vec::new()
+        };
 
         for (i, col) in body.result_columns.iter().enumerate() {
             let expr = match col {
@@ -119,6 +125,11 @@ impl<'a> Compiler<'a> {
             p2: num_cols as i32,
             p3: 0, p4: P4::None, p5: 0,
         });
+
+        let halt_addr = self.vm.ops.len();
+        for jump in skip_jumps {
+            self.vm.ops[jump].p2 = halt_addr as i32;
+        }
 
         Ok(())
     }
@@ -232,7 +243,7 @@ impl<'a> Compiler<'a> {
 
         // Emit WHERE predicate check (jump to next_label if predicate is false)
         let next_label_patches = if let Some(where_expr) = &body.where_ {
-            self.compile_where_expr(where_expr, cursor_id, &schema_cols)?
+            self.compile_where_expr(where_expr, Some((cursor_id, &schema_cols)))?
         } else {
             vec![]
         };
@@ -259,13 +270,17 @@ impl<'a> Compiler<'a> {
             None
         };
 
-        let limit_jump_addr = if sorter_cursor.is_none() && limit_reg.is_some() {
-            Some(self.vm.emit(VdbeOp {
-                opcode: Opcode::DecrJumpZero,
-                p1: limit_reg.unwrap() as i32,
-                p2: 0, // Patched later to point to end_label
-                p3: 0, p4: P4::None, p5: 0,
-            }))
+        let limit_jump_addr = if sorter_cursor.is_none() {
+            if let Some(l_reg) = limit_reg {
+                Some(self.vm.emit(VdbeOp {
+                    opcode: Opcode::DecrJumpZero,
+                    p1: l_reg as i32,
+                    p2: 0, // patch later
+                    p3: 0, p4: P4::None, p5: 0,
+                }))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -316,7 +331,7 @@ impl<'a> Compiler<'a> {
         
         // Output from Sorter if we used one
         if let Some(s_cur) = sorter_cursor {
-            let sort_top = self.vm.ops.len();
+            let _sort_top = self.vm.ops.len();
             let sorter_sort_addr = self.vm.emit(VdbeOp {
                 opcode: Opcode::SorterSort,
                 p1: s_cur as i32,
@@ -364,7 +379,7 @@ impl<'a> Compiler<'a> {
             let sort_end = self.vm.ops.len();
             self.vm.ops[sorter_sort_addr].p2 = sort_end as i32;
             
-            if let Some(l_reg) = limit_reg {
+            if let Some(_l_reg) = limit_reg {
                 // Patch the limit jump
                 self.vm.ops[sorter_sort_addr + 1].p2 = sort_end as i32;
             }
@@ -447,7 +462,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_aggregate_select(
         &mut self,
-        select: &SelectStmt,
+        _select: &SelectStmt,
         body: &SimpleSelect,
         from: &FromClause,
     ) -> CodegenResult<()> {
@@ -511,7 +526,7 @@ impl<'a> Compiler<'a> {
         let loop_top = self.vm.ops.len();
 
         let next_label_patches = if let Some(where_expr) = &body.where_ {
-            self.compile_where_expr(where_expr, cursor_id, &schema_cols)?
+            self.compile_where_expr(where_expr, Some((cursor_id, &schema_cols)))?
         } else {
             vec![]
         };
@@ -524,14 +539,9 @@ impl<'a> Compiler<'a> {
             
             let mut all_agg_args = Vec::new();
             for agg in &aggs {
-                if let Expr::Function { args, .. } = agg {
-                    match args {
-                        sqlite3_ast::FunctionArgs::List(exprs) | sqlite3_ast::FunctionArgs::Distinct(exprs) => {
-                            for e in exprs {
-                                all_agg_args.push(self.compile_expr(e, Some((cursor_id, &schema_cols)))?);
-                            }
-                        }
-                        _ => {}
+                if let Expr::Function { args: sqlite3_ast::FunctionArgs::List(exprs) | sqlite3_ast::FunctionArgs::Distinct(exprs), .. } = agg {
+                    for e in exprs {
+                        all_agg_args.push(self.compile_expr(e, Some((cursor_id, &schema_cols)))?);
                     }
                 }
             }
@@ -599,7 +609,7 @@ impl<'a> Compiler<'a> {
         for _ in 1..body.result_columns.len() { self.vm.alloc_reg(); }
 
         if let Some(sorter) = group_by_cursor {
-            let sort_top = self.vm.ops.len();
+            let _sort_top = self.vm.ops.len();
             let sorter_sort = self.vm.emit(VdbeOp {
                 opcode: Opcode::SorterSort,
                 p1: sorter as i32, p2: 0, p3: 0, p4: P4::None, p5: 0,
@@ -807,20 +817,19 @@ impl<'a> Compiler<'a> {
     fn compile_where_expr(
         &mut self,
         expr: &Expr,
-        cursor_id: usize,
-        schema_cols: &[sqlite3_ast::ColumnDef],
+        cursor_ctx: Option<(usize, &[sqlite3_ast::ColumnDef])>,
     ) -> CodegenResult<Vec<usize>> {
         match expr {
             // AND: both sides must be true; short-circuit on first false
             Expr::Binary { op: BinaryOp::And, left, right } => {
-                let mut patches = self.compile_where_expr(left, cursor_id, schema_cols)?;
-                patches.extend(self.compile_where_expr(right, cursor_id, schema_cols)?);
+                let mut patches = self.compile_where_expr(left, cursor_ctx)?;
+                patches.extend(self.compile_where_expr(right, cursor_ctx)?);
                 Ok(patches)
             }
             // OR: at least one must be true — emit both and OR their results
             Expr::Binary { op: BinaryOp::Or, left, right } => {
-                let r_left = self.compile_expr(left, Some((cursor_id, schema_cols)))?;
-                let r_right = self.compile_expr(right, Some((cursor_id, schema_cols)))?;
+                let r_left = self.compile_expr(left, cursor_ctx)?;
+                let r_right = self.compile_expr(right, cursor_ctx)?;
                 let r_or = self.vm.alloc_reg();
                 // r_or = r_left OR r_right (truthy)
                 self.vm.emit(VdbeOp {
@@ -851,7 +860,7 @@ impl<'a> Compiler<'a> {
             }
             // IsNull / NotNull checks
             Expr::IsNull { not, expr: inner } => {
-                let r = self.compile_expr(inner, Some((cursor_id, schema_cols)))?;
+                let r = self.compile_expr(inner, cursor_ctx)?;
                 let opcode = if *not { Opcode::NotNull } else { Opcode::IsNull };
                 // IsNull jumps to p2 when TRUE (it IS null), but we want to
                 // skip when the condition fails.  Invert: if NOT (is null) skip.
@@ -865,7 +874,7 @@ impl<'a> Compiler<'a> {
             }
             // All other predicates: evaluate to a boolean register, then IfNot-skip
             _ => {
-                let r_pred = self.compile_expr(expr, Some((cursor_id, schema_cols)))?;
+                let r_pred = self.compile_expr(expr, cursor_ctx)?;
                 let ifnot_addr = self.vm.emit(VdbeOp {
                     opcode: Opcode::IfNot,
                     p1: r_pred as i32, p2: 0, // patched by caller
@@ -1229,7 +1238,7 @@ impl Compiler<'_> {
 
         // WHERE predicate: on mismatch jump to skip_label (patched below)
         let where_patches = if let Some(where_expr) = &delete.where_ {
-            self.compile_where_expr(where_expr, cursor_id, &schema_cols)?
+            self.compile_where_expr(where_expr, Some((cursor_id, &schema_cols)))?
         } else {
             vec![]
         };
@@ -1283,7 +1292,7 @@ impl Compiler<'_> {
 
         // WHERE predicate
         let next_label_patches = if let Some(where_expr) = &update.where_ {
-            self.compile_where_expr(where_expr, cursor_id, &schema_cols)?
+            self.compile_where_expr(where_expr, Some((cursor_id, &schema_cols)))?
         } else {
             vec![]
         };

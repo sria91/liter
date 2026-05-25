@@ -118,10 +118,63 @@ impl Connection {
         } else {
             sqlite3_btree::BTree::open(Path::new(path), false)?
         };
+        let schema = sqlite3_schema::Schema::new();
+        
+        // Try to load schema from sqlite_schema (root page 1)
+        if let Ok(mut cursor) = btree.cursor(1, false) {
+            if cursor.move_to_first().unwrap_or(false) {
+                while cursor.is_valid() {
+                    if let Ok(payload) = cursor.data() {
+                        if let Ok(record) = sqlite3_record::decode_record(payload) {
+                            // sqlite_schema: (type, name, tbl_name, rootpage, sql)
+                            if let (
+                                Some(Value::Text(type_val)),
+                                Some(Value::Int(rootpage)),
+                                Some(Value::Text(sql)),
+                            ) = (
+                                record.first(),
+                                record.get(3),
+                                record.get(4),
+                            ) {
+                                let type_str = String::from_utf8_lossy(type_val);
+                                eprintln!("Loaded schema object: type='{}', sql={:?}", type_str, String::from_utf8_lossy(sql));
+                                if type_str == "table" {
+                                    let sql_str = String::from_utf8_lossy(sql);
+                                    match sqlite3_parser::parse_stmt(&sql_str) {
+                                        Ok(sqlite3_ast::Stmt::Create(create_stmt)) => {
+                                            if let sqlite3_ast::CreateStmt::Table(create_table) = *create_stmt {
+                                                let columns = match create_table.body {
+                                                    sqlite3_ast::CreateTableBody::Columns { columns, .. } => columns,
+                                                    _ => Vec::new(),
+                                                };
+                                                schema.insert(sqlite3_schema::SchemaObject {
+                                                    kind: sqlite3_schema::ObjectKind::Table,
+                                                    name: create_table.name.clone(),
+                                                    tbl_name: create_table.name.clone(),
+                                                    root_page: *rootpage as u32,
+                                                    sql: Some(sql_str.into_owned()),
+                                                    columns,
+                                                });
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Parse error for schema object: {}", e);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let _ = cursor.next();
+                }
+            }
+        }
+
         Ok(Self {
             path: path.to_owned(),
             btree,
-            schema: sqlite3_schema::Schema::new(),
+            schema,
             in_txn: Cell::new(false),
         })
     }
@@ -180,26 +233,21 @@ impl Connection {
         let mut root_page = None;
 
         let res = (|| -> SqliteResult<()> {
-            loop {
-                match vm.step(&self.btree, &mut cursors)? {
-                    sqlite3_vdbe::StepResult::Row => {
-                        if is_create {
-                            if let Some(row) = vm.current_result_row() {
-                                if let Some(pgno) = row[0].to_int() {
-                                    root_page = Some(pgno as u32);
-                                }
-                            }
+            while let sqlite3_vdbe::StepResult::Row = vm.step(&self.btree, &mut cursors)? {
+                if is_create {
+                    if let Some(row) = vm.current_result_row() {
+                        if let Some(pgno) = row[0].to_int() {
+                            root_page = Some(pgno as u32);
                         }
                     }
-                    sqlite3_vdbe::StepResult::Done => break,
                 }
             }
             Ok(())
         })();
 
-        if res.is_err() {
+        if let Err(e) = res {
             if auto_txn { let _ = self.btree.rollback(); }
-            return Err(res.unwrap_err());
+            return Err(e);
         }
 
         if auto_txn { self.btree.commit()?; }
@@ -251,18 +299,13 @@ impl Connection {
         let mut cursors: Vec<Option<sqlite3_vdbe::VdbeCursor>> = Vec::with_capacity(vm.n_cursors);
         for _ in 0..vm.n_cursors { cursors.push(None); }
 
-        loop {
-            match vm.step(&self.btree, &mut cursors)? {
-                sqlite3_vdbe::StepResult::Row => {
-                    if let Some(row) = vm.current_result_row() {
-                        let mut out_row = Vec::with_capacity(row.len());
-                        for mem in row {
-                            out_row.push(mem_to_value(mem));
-                        }
-                        results.push(out_row);
-                    }
+        while let sqlite3_vdbe::StepResult::Row = vm.step(&self.btree, &mut cursors)? {
+            if let Some(row) = vm.current_result_row() {
+                let mut out_row = Vec::with_capacity(row.len());
+                for mem in row {
+                    out_row.push(mem_to_value(mem));
                 }
-                sqlite3_vdbe::StepResult::Done => break,
+                results.push(out_row);
             }
         }
 
@@ -488,7 +531,7 @@ mod tests {
         assert_eq!(rows[0].len(), 3);
         assert_eq!(rows[0][0], Value::Int(42));
         assert_eq!(rows[0][1], Value::Text(b"hello".to_vec()));
-        assert_eq!(rows[0][2], Value::Real(3.14));
+        assert_eq!(rows[0][2], Value::Real(std::f64::consts::PI));
     }
 
     #[test]

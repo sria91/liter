@@ -1,3 +1,6 @@
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::manual_c_str_literals)]
+
 //! C ABI compatibility layer for SQLite3-rs.
 //!
 //! Exports `#[no_mangle] extern "C"` symbols matching `sqlite3.h`, enabling

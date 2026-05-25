@@ -22,6 +22,10 @@ impl MemStore {
     pub fn len(&self) -> usize {
         self.0.lock().len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// An open handle to an in-memory file.

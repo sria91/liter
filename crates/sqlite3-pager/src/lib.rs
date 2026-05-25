@@ -240,7 +240,7 @@ impl Wal {
     fn open(db_path: &Path, page_size: u16) -> PagerResult<Self> {
         let path = wal_path(db_path);
         let mut file = OpenOptions::new()
-            .read(true).write(true).create(true)
+            .read(true).write(true).create(true).truncate(false)
             .open(&path)?;
 
         let file_len = file.metadata()?.len();
@@ -470,7 +470,7 @@ impl Pager {
         let file = if read_only {
             File::open(path)?
         } else {
-            OpenOptions::new().read(true).write(true).create(true).open(path)?
+            OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?
         };
 
         let file_size = file.metadata()?.len();

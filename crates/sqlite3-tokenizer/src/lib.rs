@@ -228,7 +228,7 @@ pub enum Token<'src> {
 /// Errors are embedded as `Err(TokenError)` items.
 pub fn tokenize(input: &str) -> impl Iterator<Item = Result<(Token<'_>, std::ops::Range<usize>), TokenError>> + '_ {
     Token::lexer(input).spanned().map(|(tok, span)| {
-        tok.map(|t| (t, span)).map_err(|e| e)
+        tok.map(|t| (t, span))
     })
 }
 

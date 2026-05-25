@@ -205,7 +205,7 @@ fn test_vdbe_types() {
     vm.emit(VdbeOp {
         opcode: Opcode::Real,
         p1: 0, p2: 0, p3: 0,
-        p4: P4::Real(3.14),
+        p4: P4::Real(std::f64::consts::PI),
         p5: 0,
     });
     vm.emit(VdbeOp {
@@ -228,7 +228,7 @@ fn test_vdbe_types() {
 
     assert_eq!(vm.step(&btree, &mut cursors).unwrap(), StepResult::Row);
     let row = vm.current_result_row().unwrap();
-    assert_eq!(row[0], Mem::Real(3.14));
+    assert_eq!(row[0], Mem::Real(std::f64::consts::PI));
     assert_eq!(row[1], Mem::Text(std::sync::Arc::from("hello")));
     assert_eq!(row[2], Mem::Null);
     assert_eq!(vm.step(&btree, &mut cursors).unwrap(), StepResult::Done);

@@ -61,7 +61,7 @@ pub fn strftime(fmt: &str, julian_day: f64) -> Result<String, FmtError> {
                 let unix = (julian_day - 2440587.5) * 86400.0;
                 out.push_str(&format!("{}", unix as i64));
             }
-            Some(other) => {
+            Some(_other) => {
                 return Err(FmtError::InvalidFormat);
             }
             None => return Err(FmtError::InvalidFormat),

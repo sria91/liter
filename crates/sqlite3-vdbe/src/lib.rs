@@ -6,7 +6,7 @@
 //! ## Status
 //! Phase 3 — type definitions and VM skeleton only.
 
-use sqlite3_btree::{BTree, BTreeCursor, PageKind, SeekBias, SeekResult};
+use sqlite3_btree::PageKind;
 use std::sync::Arc;
 
 
@@ -65,6 +65,7 @@ impl Mem {
 
     /// Compare two Mem values using SQLite sorting rules:
     /// Null < Integer/Real < Text < Blob
+    #[allow(clippy::should_implement_trait)]
     pub fn cmp(&self, other: &Mem) -> std::cmp::Ordering {
         use std::cmp::Ordering;
 
@@ -318,8 +319,10 @@ pub struct Vdbe {
     /// Number of cursors required by this program.
     pub n_cursors: usize,
     /// Function dispatcher to handle Opcode::Function.
+    #[allow(clippy::type_complexity)]
     pub func_dispatcher: Option<fn(&str, &[Mem]) -> Result<Mem, String>>,
     /// Dispatcher to instantiate aggregate states for Opcode::AggStep.
+    #[allow(clippy::type_complexity)]
     pub agg_dispatcher: Option<fn(&str) -> Result<Box<dyn AggregateState>, String>>,
     /// Instantiated aggregate states.
     aggs: Vec<Box<dyn AggregateState>>,
@@ -558,7 +561,7 @@ impl Vdbe {
                     if let Some(cursor) = &mut cursors[cursor_idx] {
                         let cursor = cursor.as_btree_mut()?;
                         let max_id = cursor.max_rowid()?;
-                        self.regs[dest_reg] = Mem::Int((max_id + 1) as i64);
+                        self.regs[dest_reg] = Mem::Int(max_id + 1);
                     } else {
                         return Err(VdbeError::Exec("cursor not open".into()));
                     }
@@ -810,9 +813,8 @@ impl Vdbe {
                     let result = cursor.move_to(&key_val.to_be_bytes(), sqlite3_btree::SeekBias::Ge)?;
                     match result {
                         sqlite3_btree::SeekResult::Empty => { self.pc = jump_addr; }
-                        sqlite3_btree::SeekResult::Greater => {
-                            if !cursor.previous()? { self.pc = jump_addr; }
-                        }
+                        sqlite3_btree::SeekResult::Greater if !cursor.previous()? => { self.pc = jump_addr; }
+                        sqlite3_btree::SeekResult::Greater => {}
                         _ => {}
                     }
                 }

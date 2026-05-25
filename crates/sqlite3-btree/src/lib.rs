@@ -312,6 +312,7 @@ impl BTreeCursor<'_> {
         self.search(self.root_page, rowid)
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> BTreeResult<bool> {
         if self.state != CursorState::Valid { return Ok(false); }
         self.step_next()
@@ -499,6 +500,7 @@ impl BTreeCursor<'_> {
     ///    half to a new (right) page.
     /// 4. Promote the first rowid of the right page into the parent interior
     ///    node (or, if the page is the root, grow the tree by one level).
+    ///
     /// Split the full leaf at `leaf_pgno` and insert `new_cell` with `rowid`.
     ///
     /// The cursor stack must contain the path from root → `leaf_pgno`.
@@ -545,7 +547,7 @@ impl BTreeCursor<'_> {
         let mid = if cells.len() == 1 {
             0 // all 1 cell goes left; right page starts empty but is needed for future inserts
         } else {
-            ((cells.len() + 1) / 2).min(cells.len() - 1)
+            cells.len().div_ceil(2).min(cells.len() - 1)
         };
         // divider_rowid is the first rowid of the right page (cells[mid+1] if splitting evenly,
         // or cells[mid] when mid puts the last cell on the right).
@@ -1006,7 +1008,7 @@ fn insert_cell_into_page(
 
 /// Low-level raw cell insert (no rowid sort; used when building interior pages).
 fn insert_cell_raw(
-    data: &mut Vec<u8>,
+    data: &mut [u8],
     pgno: PageNumber,
     cell: &[u8],
     page_size: u16,

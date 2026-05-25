@@ -55,7 +55,7 @@ pub fn utf8_to_utf16le(s: &str) -> Vec<u8> {
 
 /// Convert UTF-16 LE bytes to a Rust `String`.
 pub fn utf16le_to_string(bytes: &[u8]) -> Result<String, UnicodeError> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(UnicodeError::InvalidUtf16);
     }
     let units: Vec<u16> = bytes

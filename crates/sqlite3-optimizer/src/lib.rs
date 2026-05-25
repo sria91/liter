@@ -136,25 +136,21 @@ impl<'a> Optimizer<'a> {
     }
 
     fn extract_constraints(&self, expr: &Expr, target_table: &str, constraints: &mut Vec<String>) {
-        match expr {
-            Expr::Binary { op, left, right } => {
-                if matches!(op, BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le) {
-                    if let Expr::Column { table, name, .. } = &**left {
-                        if table.is_none() || table.as_deref() == Some(target_table) {
-                            constraints.push(name.clone());
-                        }
-                    }
-                    if let Expr::Column { table, name, .. } = &**right {
-                        if table.is_none() || table.as_deref() == Some(target_table) {
-                            constraints.push(name.clone());
-                        }
+        if let Expr::Binary { op, left, right } = expr {
+            if matches!(op, BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le) {
+                if let Expr::Column { table, name, .. } = &**left {
+                    if table.is_none() || table.as_deref() == Some(target_table) {
+                        constraints.push(name.clone());
                     }
                 }
-                self.extract_constraints(left, target_table, constraints);
-                self.extract_constraints(right, target_table, constraints);
+                if let Expr::Column { table, name, .. } = &**right {
+                    if table.is_none() || table.as_deref() == Some(target_table) {
+                        constraints.push(name.clone());
+                    }
+                }
             }
-            // Add other logical AND/OR traversals as needed
-            _ => {}
+            self.extract_constraints(left, target_table, constraints);
+            self.extract_constraints(right, target_table, constraints);
         }
     }
 }

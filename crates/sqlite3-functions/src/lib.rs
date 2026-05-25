@@ -50,23 +50,48 @@ impl sqlite3_vdbe::AggregateState for CountState {
 
 #[derive(Debug)]
 struct SumState {
-    sum: Option<f64>,
+    sum: Option<Mem>,
 }
 impl sqlite3_vdbe::AggregateState for SumState {
     fn step(&mut self, args: &[Mem]) -> Result<(), String> {
         if let Some(val) = args.first() {
-            if let Some(num) = val.to_real() {
-                self.sum = Some(self.sum.unwrap_or(0.0) + num);
+            if val.is_null() { return Ok(()); }
+            match &self.sum {
+                None => {
+                    self.sum = match val {
+                        Mem::Int(i) => Some(Mem::Int(*i)),
+                        Mem::Real(f) => Some(Mem::Real(*f)),
+                        v => Some(Mem::Real(v.to_real().unwrap_or(0.0))),
+                    };
+                }
+                Some(Mem::Int(acc)) => {
+                    match val {
+                        Mem::Int(i) => {
+                            if let Some(new_acc) = acc.checked_add(*i) {
+                                self.sum = Some(Mem::Int(new_acc));
+                            } else {
+                                self.sum = Some(Mem::Real(*acc as f64 + *i as f64));
+                            }
+                        }
+                        Mem::Real(f) => {
+                            self.sum = Some(Mem::Real(*acc as f64 + f));
+                        }
+                        v => {
+                            let f = v.to_real().unwrap_or(0.0);
+                            self.sum = Some(Mem::Real(*acc as f64 + f));
+                        }
+                    }
+                }
+                Some(Mem::Real(acc)) => {
+                    self.sum = Some(Mem::Real(*acc + val.to_real().unwrap_or(0.0)));
+                }
+                _ => {}
             }
         }
         Ok(())
     }
     fn finalize(&mut self) -> Result<Mem, String> {
-        if let Some(s) = self.sum {
-            Ok(Mem::Real(s))
-        } else {
-            Ok(Mem::Null)
-        }
+        Ok(self.sum.take().unwrap_or(Mem::Null))
     }
 }
 
@@ -360,15 +385,17 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_round() {
-        assert_eq!(func_round(&[Mem::Real(3.14159), Mem::Int(2)]).unwrap(), Mem::Real(3.14));
-        assert_eq!(func_round(&[Mem::Real(3.14159)]).unwrap(), Mem::Real(3.0));
+        assert_eq!(func_round(&[Mem::Real(std::f64::consts::PI), Mem::Int(2)]).unwrap(), Mem::Real(3.14));
+        assert_eq!(func_round(&[Mem::Real(std::f64::consts::PI)]).unwrap(), Mem::Real(3.0));
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_sign() {
         assert_eq!(func_sign(&[Mem::Int(-42)]).unwrap(), Mem::Int(-1));
-        assert_eq!(func_sign(&[Mem::Real(3.14)]).unwrap(), Mem::Int(1));
+        assert_eq!(func_sign(&[Mem::Real(std::f64::consts::PI)]).unwrap(), Mem::Int(1));
         assert_eq!(func_sign(&[Mem::Int(0)]).unwrap(), Mem::Int(0));
     }
 }

@@ -1,9 +1,11 @@
 #![no_main]
+
 use libfuzzer_sys::fuzz_target;
+use sqlite3_parser::Parser;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
-        // Parser returns NotImplemented for now; exercise the tokenizer path.
-        let _ = sqlite3_parser::parse_stmt(s);
+        let mut parser = Parser::new(s);
+        let _ = parser.parse_all();
     }
 });

@@ -41,6 +41,7 @@ pub struct SelectStmt {
 
 /// The core of a SELECT (may be a compound via UNION/INTERSECT/EXCEPT).
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum SelectBody {
     Simple(SimpleSelect),
     Compound {
@@ -341,6 +342,7 @@ pub enum TriggerEvent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum TriggerStmt {
     Update(UpdateStmt),
     Insert(InsertStmt),

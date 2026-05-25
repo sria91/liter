@@ -1,3 +1,5 @@
+#![allow(clippy::manual_c_str_literals)]
+
 use sqlite3_ffi::*;
 use std::ffi::{CString, c_char};
 use std::ptr;

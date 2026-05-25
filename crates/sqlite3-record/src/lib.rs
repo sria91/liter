@@ -225,7 +225,7 @@ pub fn encode_record(values: &[Value]) -> RecordResult<Vec<u8>> {
                     let n = encode_varint(2, &mut tmp)?;
                     header.extend_from_slice(&tmp[..n]);
                     payload.extend_from_slice(&(i as i16).to_be_bytes());
-                } else if i >= -8388608 && i <= 8388607 { // 24-bit
+                } else if (-8388608..=8388607).contains(&i) { // 24-bit
                     let mut tmp = [0u8; 9];
                     let n = encode_varint(3, &mut tmp)?;
                     header.extend_from_slice(&tmp[..n]);
@@ -236,7 +236,7 @@ pub fn encode_record(values: &[Value]) -> RecordResult<Vec<u8>> {
                     let n = encode_varint(4, &mut tmp)?;
                     header.extend_from_slice(&tmp[..n]);
                     payload.extend_from_slice(&(i as i32).to_be_bytes());
-                } else if i >= -140737488355328 && i <= 140737488355327 { // 48-bit
+                } else if (-140737488355328..=140737488355327).contains(&i) { // 48-bit
                     let mut tmp = [0u8; 9];
                     let n = encode_varint(5, &mut tmp)?;
                     header.extend_from_slice(&tmp[..n]);
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn decode_real() {
-        let f: f64 = 3.14;
+        let f: f64 = std::f64::consts::PI;
         let bytes = f.to_be_bytes();
         let (v, n) = decode_value(7, &bytes).unwrap();
         assert_eq!(v, Value::Real(f));

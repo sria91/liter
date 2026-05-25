@@ -148,11 +148,9 @@ impl<'a> Resolver<'a> {
 
                 if let Some(t_name) = table {
                     for (alias, obj) in available_tables {
-                        if alias == t_name {
-                            if obj.columns.iter().any(|c| &c.name == name) {
-                                matches += 1;
-                                resolved_table = Some(alias.clone());
-                            }
+                        if alias == t_name && obj.columns.iter().any(|c| &c.name == name) {
+                            matches += 1;
+                            resolved_table = Some(alias.clone());
                         }
                     }
                 } else {

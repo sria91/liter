@@ -316,10 +316,36 @@ impl<'a> Parser<'a> {
                  self.consume()?;
             }
 
+            let mut constraints = Vec::new();
+            loop {
+                if let Some(Token::Primary) = self.peek()? {
+                    self.consume()?;
+                    self.expect(Token::Key)?;
+                    let mut direction = None;
+                    if self.consume_if(Token::Asc)? { direction = Some(SortDirection::Asc); }
+                    else if self.consume_if(Token::Desc)? { direction = Some(SortDirection::Desc); }
+                    
+                    let conflict = None; // TODO: conflict clause
+                    let autoincrement = self.consume_if(Token::Autoincrement)?;
+                    
+                    constraints.push(ColumnConstraint::PrimaryKey {
+                        direction,
+                        conflict,
+                        autoincrement,
+                    });
+                } else if let Some(Token::Not) = self.peek()? {
+                    self.consume()?;
+                    self.expect(Token::Null)?;
+                    constraints.push(ColumnConstraint::NotNull { conflict: None });
+                } else {
+                    break;
+                }
+            }
+
             columns.push(ColumnDef {
                 name: col_name,
                 type_name,
-                constraints: vec![],
+                constraints,
             });
 
             if let Some(Token::Comma) = self.peek()? {
