@@ -1,0 +1,27 @@
+# Conformance manifest for official SQLite TCL suite execution.
+# This file defines the current in-scope and excluded suites for Tier 3 tracking.
+
+[metadata]
+sqlite_version = "3.53.0"
+mode = "tier3"
+owner = "core-engine"
+
+[smoke]
+# Deterministic subset for PR checks.
+include = ["main.test"]
+
+[full_core]
+# Start with a small in-scope list and expand as buckets close.
+include = ["main.test"]
+
+[excluded_families]
+# Explicitly excluded in this phase per project decision.
+items = ["fts5", "json1", "rtree", "session"]
+
+[temporary_skips]
+# Add entries as needed:
+# [[temporary_skips.item]]
+# test = "some.test"
+# reason = "brief rationale"
+# owner = "team-or-person"
+# expires = "2026-07-01"
