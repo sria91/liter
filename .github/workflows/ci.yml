@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build_and_test:
@@ -37,7 +38,6 @@ jobs:
 
   tcl_conformance_smoke:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
     - uses: actions/checkout@v4
 
@@ -126,12 +126,23 @@ jobs:
           echo "No TCL smoke summary file produced"
         fi
 
+    - name: Stage TCL Smoke Artifacts
+      if: always()
+      run: |
+        set -euxo pipefail
+        mkdir -p artifacts/tcl-smoke
+        cp tests/tcl_suite/conformance-manifest.toml artifacts/tcl-smoke/
+        if [ -f /tmp/tcl-smoke-summary.txt ]; then
+          cp /tmp/tcl-smoke-summary.txt artifacts/tcl-smoke/
+        fi
+        if [ -f "$SQLITE_TCL_DIR/testrunner.log" ]; then
+          cp "$SQLITE_TCL_DIR/testrunner.log" artifacts/tcl-smoke/
+        fi
+        find target/debug/deps -maxdepth 1 -type f \( -name '*tcl_suite*' -o -name '*tcl-suite*' \) -exec cp {} artifacts/tcl-smoke/ \;
+
     - name: Upload TCL Smoke Logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: tcl-smoke-logs
-        path: |
-          target/debug/deps/*tcl_suite*
-          /tmp/tcl-smoke-summary.txt
-          tests/tcl_suite/conformance-manifest.toml
+        path: artifacts/tcl-smoke
