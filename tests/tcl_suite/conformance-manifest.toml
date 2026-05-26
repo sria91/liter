@@ -11,7 +11,7 @@ owner = "core-engine"
 include = ["main.test"]
 
 [full_core]
-# Start with a small in-scope list and expand as buckets close.
+# Scheduled lane: begin with known-good baseline and expand weekly.
 include = ["main.test"]
 
 [excluded_families]

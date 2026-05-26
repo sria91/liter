@@ -5,6 +5,18 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      tcl_scope:
+        description: "TCL conformance scope to run"
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full_core
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,6 +49,7 @@ jobs:
       run: cargo test -p differential
 
   tcl_conformance_smoke:
+    if: github.event_name != 'workflow_dispatch' || inputs.tcl_scope == 'smoke'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -146,3 +159,108 @@ jobs:
       with:
         name: tcl-smoke-logs
         path: artifacts/tcl-smoke
+
+  tcl_conformance_full_core:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.tcl_scope == 'full_core')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install Tcl
+      run: sudo apt-get update && sudo apt-get install -y tcl tcl-dev tcl8.6-dev
+
+    - name: Download SQLite TCL Corpus (3.53.0)
+      run: |
+        set -euxo pipefail
+        mkdir -p /tmp/sqlite-src
+        cd /tmp/sqlite-src
+        curl -fsSL "https://sqlite.org/src/tarball/sqlite.tar.gz?r=version-3.53.0" -o sqlite.tar.gz
+        tar -xzf sqlite.tar.gz
+        ROOT_DIR="$(find . -maxdepth 1 -type d -name 'sqlite*' | head -n1)"
+        if [ -z "$ROOT_DIR" ]; then
+          echo "Could not locate extracted sqlite source directory"
+          exit 1
+        fi
+        echo "SQLITE_TCL_DIR=/tmp/sqlite-src/${ROOT_DIR#./}" >> "$GITHUB_ENV"
+
+    - name: Build FFI Dynamic Library
+      run: cargo build -p liter-ffi
+
+    - name: Locate Tcl Build Config
+      run: |
+        set -euxo pipefail
+        TCL_CONFIG_SH=""
+
+        if dpkg -s tcl8.6-dev >/dev/null 2>&1; then
+          TCL_CONFIG_SH="$(dpkg -L tcl8.6-dev | grep '/tclConfig.sh$' | head -n1 || true)"
+        fi
+
+        if [ -z "$TCL_CONFIG_SH" ] && dpkg -s tcl-dev >/dev/null 2>&1; then
+          TCL_CONFIG_SH="$(dpkg -L tcl-dev | grep '/tclConfig.sh$' | head -n1 || true)"
+        fi
+
+        if [ -z "$TCL_CONFIG_SH" ]; then
+          TCL_CONFIG_SH="$(find /usr -name tclConfig.sh 2>/dev/null | head -n1 || true)"
+        fi
+
+        if [ -z "$TCL_CONFIG_SH" ]; then
+          echo "Unable to locate tclConfig.sh"
+          echo "Installed Tcl packages:"
+          dpkg -l | grep '^ii' | grep -E 'tcl|tk' || true
+          exit 1
+        fi
+
+        echo "Using TCL_CONFIG_SH=$TCL_CONFIG_SH"
+        echo "TCL_CONFIG_SH=$TCL_CONFIG_SH" >> "$GITHUB_ENV"
+        echo "TCL_CONFIG_DIR=$(dirname "$TCL_CONFIG_SH")" >> "$GITHUB_ENV"
+
+    - name: Build SQLite Testfixture
+      run: |
+        set -euxo pipefail
+        cd "$SQLITE_TCL_DIR"
+        ./configure --with-tcl="$TCL_CONFIG_DIR"
+        export TCL_CONFIG_SH
+        make -j"$(nproc)" testfixture
+
+    - name: Run TCL Conformance Full Core
+      env:
+        LITER_SQLITE_LIB: ${{ github.workspace }}/target/debug/libliter_ffi.so
+        LITER_TCL_MANIFEST: tests/tcl_suite/conformance-manifest.toml
+        LITER_TCL_SCOPE: full_core
+        LITER_TCL_SHELL: ${{ env.SQLITE_TCL_DIR }}/testfixture
+        LITER_TCL_SUMMARY_FILE: /tmp/tcl-full-core-summary.txt
+      run: cargo test -p tcl-suite tests::tcl_conformance_smoke -- --ignored --exact --nocapture
+
+    - name: Show TCL Full Core Summary
+      if: always()
+      run: |
+        if [ -f /tmp/tcl-full-core-summary.txt ]; then
+          cat /tmp/tcl-full-core-summary.txt
+        else
+          echo "No TCL full-core summary file produced"
+        fi
+
+    - name: Stage TCL Full Core Artifacts
+      if: always()
+      run: |
+        set -euxo pipefail
+        mkdir -p artifacts/tcl-full-core
+        cp tests/tcl_suite/conformance-manifest.toml artifacts/tcl-full-core/
+        if [ -f /tmp/tcl-full-core-summary.txt ]; then
+          cp /tmp/tcl-full-core-summary.txt artifacts/tcl-full-core/
+        fi
+        if [ -f "$SQLITE_TCL_DIR/testrunner.log" ]; then
+          cp "$SQLITE_TCL_DIR/testrunner.log" artifacts/tcl-full-core/
+        fi
+        find target/debug/deps -maxdepth 1 -type f \( -name '*tcl_suite*' -o -name '*tcl-suite*' \) -exec cp {} artifacts/tcl-full-core/ \;
+
+    - name: Upload TCL Full Core Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: tcl-full-core-logs
+        path: artifacts/tcl-full-core
