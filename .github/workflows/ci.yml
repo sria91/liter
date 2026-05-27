@@ -12,11 +12,12 @@ on:
       tcl_scope:
         description: "TCL conformance scope to run"
         required: true
-        default: smoke
+        default: all
         type: choice
         options:
           - smoke
           - full_core
+          - all
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,7 +49,7 @@ jobs:
       run: cargo test -p differential
 
   tcl_conformance_smoke:
-    if: github.event_name != 'workflow_dispatch' || inputs.tcl_scope == 'smoke'
+    if: github.event_name != 'workflow_dispatch' || inputs.tcl_scope == 'smoke' || inputs.tcl_scope == 'all'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
@@ -160,7 +161,7 @@ jobs:
         path: artifacts/tcl-smoke
 
   tcl_conformance_full_core:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.tcl_scope == 'full_core')
+    if: github.event_name != 'workflow_dispatch' || inputs.tcl_scope == 'full_core' || inputs.tcl_scope == 'all'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
