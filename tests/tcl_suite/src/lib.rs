@@ -236,10 +236,40 @@ fn parse_tests_from_manifest_file(
     ))
 }
 
+fn resolve_manifest_path(raw: PathBuf) -> PathBuf {
+    if raw.is_absolute() {
+        return raw;
+    }
+
+    if raw.exists() {
+        return raw;
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let candidate = workspace_root.join(&raw);
+    if candidate.exists() {
+        return candidate;
+    }
+
+    raw
+}
+
 fn parse_tests_from_manifest() -> Result<Vec<String>, String> {
     let manifest_path = env::var("LITER_TCL_MANIFEST")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("tests/tcl_suite/conformance-manifest.toml"));
+    let manifest_path = resolve_manifest_path(manifest_path);
+    if !manifest_path.exists() {
+        return Err(format!(
+            "manifest path not found: {} (set LITER_TCL_MANIFEST)",
+            manifest_path.display()
+        ));
+    }
     let scope = env::var("LITER_TCL_SCOPE").unwrap_or_else(|_| "smoke".to_string());
     parse_tests_from_manifest_file(&manifest_path, &scope)
 }
@@ -253,11 +283,7 @@ fn resolve_tests() -> Result<Vec<String>, String> {
         return Ok(tests);
     }
 
-    match parse_tests_from_manifest() {
-        Ok(tests) if !tests.is_empty() => Ok(tests),
-        Ok(_) => Err("manifest resolved an empty test list".to_string()),
-        Err(_) => Ok(vec!["main.test".to_string()]),
-    }
+    parse_tests_from_manifest()
 }
 
 pub fn run_tcl_suite_smoke() -> Result<TclRunSummary, String> {
