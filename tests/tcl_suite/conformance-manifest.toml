@@ -11,8 +11,21 @@ owner = "core-engine"
 include = ["main.test"]
 
 [full_core]
-# Scheduled lane: begin with known-good baseline and expand weekly.
-include = ["main.test"]
+# Broader core-engine coverage for scheduled and full CI lanes.
+include = [
+	"main.test",
+	"alter.test",
+	"delete.test",
+	"expr.test",
+	"index.test",
+	"insert.test",
+	"pragma.test",
+	"table.test",
+	"trans.test",
+	"types.test",
+	"update.test",
+	"where.test",
+]
 
 [excluded_families]
 # Explicitly excluded in this phase per project decision.
