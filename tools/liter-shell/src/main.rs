@@ -1,12 +1,11 @@
 //! liter-shell — interactive command-line interface for liter-rs.
 //!
 //! Mirrors the `sqlite3` shell from the C SQLite distribution. Supports
-//! interactive SQL entry, dot-commands, and scripting via stdin.
-//!
-//! ## Status
-//! Scaffold only — prompts for input but does not yet execute queries.
+//! interactive SQL entry, dot-commands, and scripting via stdin (piped or
+//! interactive).  When stdin is not a TTY the banner and continuation prompts
+//! are suppressed so the shell can be driven like the C `sqlite3` binary.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -20,12 +19,16 @@ fn main() {
         }
     };
 
-    println!(
-        "Liter-rs v{} — targeting SQLite 3.53.x",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!("Connected to: {}", conn.path());
-    println!("Enter SQL statements terminated by ';', or '.quit' to exit.");
+    let interactive = io::stdin().is_terminal();
+
+    if interactive {
+        println!(
+            "Liter-rs v{} — targeting SQLite 3.53.x",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!("Connected to: {}", conn.path());
+        println!("Enter SQL statements terminated by ';', or '.quit' to exit.");
+    }
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -58,24 +61,68 @@ fn main() {
         if trimmed.ends_with(';') {
             let sql = sql_buf.trim().to_owned();
             sql_buf.clear();
-            match conn.query(&sql, [] as [(); 0]) {
-                Ok(rows) => {
-                    for row in &rows {
-                        let cols: Vec<String> = row.iter().map(|v| format!("{v:?}")).collect();
-                        writeln!(out, "{}", cols.join("|")).ok();
-                    }
-                }
-                Err(liter::SqliteError::NotImplemented) => {
-                    writeln!(out, "-- query engine not yet implemented --").ok();
-                }
-                Err(e) => {
-                    writeln!(out, "Error: {e}").ok();
-                }
-            }
-        } else {
+            exec_sql(&sql, &conn, &mut out, interactive);
+        } else if interactive {
             print!("   ...> ");
             out.flush().ok();
         }
+    }
+}
+
+/// Returns true when `sql` is a read-only statement that produces result rows.
+fn is_returning_sql(sql: &str) -> bool {
+    let first = sql
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        first.as_str(),
+        "select" | "explain" | "with" | "values" | "pragma"
+    )
+}
+
+fn exec_sql(sql: &str, conn: &liter::Connection, out: &mut impl Write, interactive: bool) {
+    if is_returning_sql(sql) {
+        match conn.query(sql, [] as [(); 0]) {
+            Ok(rows) => {
+                for row in &rows {
+                    let cols: Vec<String> = row.iter().map(format_value).collect();
+                    writeln!(out, "{}", cols.join("|")).ok();
+                }
+            }
+            Err(liter::SqliteError::NotImplemented) => {
+                if interactive {
+                    writeln!(out, "-- not yet implemented --").ok();
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+            }
+        }
+    } else {
+        match conn.execute(sql, [] as [(); 0]) {
+            Ok(_) => {}
+            Err(liter::SqliteError::NotImplemented) => {
+                if interactive {
+                    writeln!(out, "-- not yet implemented --").ok();
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+            }
+        }
+    }
+}
+
+fn format_value(v: &liter::Value) -> String {
+    match v {
+        liter::Value::Null => String::new(),
+        liter::Value::Int(i) => i.to_string(),
+        liter::Value::Real(f) => f.to_string(),
+        liter::Value::Text(b) => String::from_utf8_lossy(b).into_owned(),
+        liter::Value::Blob(b) => format!("{b:?}"),
+        liter::Value::ZeroBlob(n) => format!("(zeroblob {n})"),
     }
 }
 

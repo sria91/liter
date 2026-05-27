@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<!--Phoronix Test Suite-->
+<PhoronixTestSuite>
+  <Downloads>
+    <Package>
+      <URL>http://www.phoronix-test-suite.com/benchmark-files/pts-sqlite-tests-1.tar.gz</URL>
+      <MD5>153e725642619e38766ddf8359f65cfe</MD5>
+      <SHA256>1067f047461e21fd56e2a6ae03043c687047d00192ffdbe5b52271cd39de442f</SHA256>
+      <FileName>pts-sqlite-tests-1.tar.gz</FileName>
+      <FileSize>42835</FileSize>
+    </Package>
+  </Downloads>
+</PhoronixTestSuite>

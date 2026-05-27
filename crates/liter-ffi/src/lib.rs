@@ -393,3 +393,10 @@ pub unsafe extern "C" fn sqlite3_libversion() -> *const c_char {
 pub unsafe extern "C" fn sqlite3_libversion_number() -> c_int {
     3_053_000
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_free(_p: *mut c_void) {
+    // liter-ffi does not currently allocate error strings through a C-compatible
+    // allocator, so sqlite3_exec() never sets *pzErrMsg. This function is always
+    // called with NULL and is intentionally a no-op.
+}

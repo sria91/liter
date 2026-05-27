@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!--Phoronix Test Suite-->
+<PhoronixTestSuite>
+  <ResultsDefinition>
+    <ResultsFormat>
+      <Sensor>sys.time</Sensor>
+    </ResultsFormat>
+  </ResultsDefinition>
+</PhoronixTestSuite>

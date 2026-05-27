@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<!--Phoronix Test Suite-->
+<PhoronixTestSuite>
+  <TestInformation>
+    <Title>SQLite (Liter-rs — FFI)</Title>
+    <AppVersion>0.1.0</AppVersion>
+    <Description>Measures the same INSERT workload as pts/sqlite-2.3.0 but
+driven by liter-ffi-cli — a minimal C CLI shim linked against libliter_ffi.so,
+the liter-rs C ABI compatibility layer.  Exercises the full FFI surface
+(sqlite3_open, sqlite3_exec, sqlite3_close) under the standard pts/sqlite
+workload.</Description>
+    <ResultScale>Seconds</ResultScale>
+    <Proportion>LIB</Proportion>
+    <Executable>sqlite-benchmark</Executable>
+    <TimesToRun>3</TimesToRun>
+  </TestInformation>
+  <TestProfile>
+    <Version>1.0.0</Version>
+    <SupportedPlatforms>Linux</SupportedPlatforms>
+    <SoftwareType>Benchmark</SoftwareType>
+    <TestType>Disk</TestType>
+    <License>Free</License>
+    <Status>Verified</Status>
+    <EnvironmentSize>10</EnvironmentSize>
+    <ProjectURL>https://github.com/your-org/liter</ProjectURL>
+    <Maintainer>Liter Project</Maintainer>
+  </TestProfile>
+  <TestSettings>
+    <Option>
+      <DisplayName>Threads / Copies</DisplayName>
+      <Identifier>cpu-threads</Identifier>
+      <Menu>
+        <Entry>
+          <Name>1</Name>
+          <Value>1</Value>
+        </Entry>
+        <Entry>
+          <Name>8</Name>
+          <Value>8</Value>
+        </Entry>
+        <Entry>
+          <Name>32</Name>
+          <Value>32</Value>
+        </Entry>
+      </Menu>
+    </Option>
+  </TestSettings>
+</PhoronixTestSuite>
