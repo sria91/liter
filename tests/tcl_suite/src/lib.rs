@@ -355,6 +355,7 @@ mod tests {
     ///
     /// Required environment variables:
     /// - `SQLITE_TCL_DIR`: SQLite source root containing `test/testrunner.tcl`
+    ///
     /// Optional environment variables:
     /// - `LITER_SQLITE_LIB`: path to `libliter_ffi` dynamic library
     /// - `LITER_TCL_TESTS`: comma-separated list of test files (overrides manifest)
