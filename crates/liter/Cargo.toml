@@ -23,6 +23,7 @@ liter-vdbe = { path = "../liter-vdbe" }
 liter-functions = { path = "../liter-functions" }
 thiserror.workspace = true
 parking_lot.workspace = true
+log.workspace = true
 liter-json = { version = "0.1.0", path = "../liter-json" }
 
 [features]

@@ -32,7 +32,8 @@ members = [
     "tests/differential",
     "tests/format_compat",
     "tests/tcl_suite",
-    "tests/oom", "crates/liter-session",
+    "tests/oom",
+    "crates/liter-session",
 ]
 
 [workspace.package]
@@ -44,6 +45,9 @@ authors = []
 [workspace.dependencies]
 # Error handling
 thiserror = "2"
+
+# Logging
+log = "0.4"
 
 # Tokenizer
 logos = "0.15"

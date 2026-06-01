@@ -25,6 +25,8 @@
 use std::cell::Cell;
 use std::path::Path;
 
+use log::{debug, trace, warn};
+
 pub use liter_record::Value;
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
@@ -137,7 +139,7 @@ impl Connection {
                             ) = (record.first(), record.get(3), record.get(4))
                             {
                                 let type_str = String::from_utf8_lossy(type_val);
-                                eprintln!(
+                                debug!(
                                     "Loaded schema object: type='{}', sql={:?}",
                                     type_str,
                                     String::from_utf8_lossy(sql)
@@ -167,7 +169,7 @@ impl Connection {
                                             }
                                         }
                                         Err(e) => {
-                                            eprintln!("Parse error for schema object: {}", e);
+                                            warn!("Parse error for schema object: {}", e);
                                         }
                                         _ => {}
                                     }
@@ -298,9 +300,11 @@ impl Connection {
         let mut results = Vec::new();
 
         let mut vm = liter_codegen::compile_with_schema(&ast, &self.schema)?;
-        eprintln!("VDBE ops for sql '{}':", sql);
-        for (i, op) in vm.ops.iter().enumerate() {
-            eprintln!("{:04} {:?}", i, op);
+        if log::log_enabled!(log::Level::Trace) {
+            trace!("VDBE ops for sql '{}':", sql);
+            for (i, op) in vm.ops.iter().enumerate() {
+                trace!("{:04} {:?}", i, op);
+            }
         }
         vm.func_dispatcher = Some(|name, args| {
             if name.to_ascii_lowercase().starts_with("json") || name == "->" || name == "->>" {
@@ -359,9 +363,11 @@ impl Connection {
     pub fn prepare<'c>(&'c self, sql: &str) -> SqliteResult<Statement<'c>> {
         let ast = liter_parser::parse_stmt(sql)?;
         let vm = liter_codegen::compile_with_schema(&ast, &self.schema)?;
-        eprintln!("VDBE ops for sql '{}':", sql);
-        for (i, op) in vm.ops.iter().enumerate() {
-            eprintln!("{:04} {:?}", i, op);
+        if log::log_enabled!(log::Level::Trace) {
+            trace!("VDBE ops for sql '{}':", sql);
+            for (i, op) in vm.ops.iter().enumerate() {
+                trace!("{:04} {:?}", i, op);
+            }
         }
         let n = vm.n_cursors;
         Ok(Statement {

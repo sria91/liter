@@ -7,6 +7,8 @@ use liter_ast::*;
 use liter_vdbe::{Opcode, Vdbe, VdbeOp, P4};
 use std::sync::Arc;
 
+use log::trace;
+
 use liter_schema::Schema;
 
 #[derive(Debug, thiserror::Error)]
@@ -838,12 +840,12 @@ impl<'a> Compiler<'a> {
 
             // Map GROUP BY expressions to their extracted registers so that HAVING and SELECT don't access the table cursor.
             for (gb_expr, reg) in body.group_by.iter().zip(prev_keys.iter()) {
-                println!("pushing group by to agg_regs: {:?} -> {}", gb_expr, *reg);
+                trace!("pushing group by to agg_regs: {:?} -> {}", gb_expr, *reg);
                 self.agg_regs.push((gb_expr.clone(), *reg));
             }
 
             if let Some(having) = &body.having {
-                println!("compiling having: {:?}", having);
+                trace!("compiling having: {:?}", having);
                 let h_reg = self.compile_expr(having, Some((cursor_id, &schema_cols)))?;
                 having_jump = Some(self.vm.emit(VdbeOp {
                     opcode: Opcode::Eq,
@@ -858,7 +860,7 @@ impl<'a> Compiler<'a> {
             for (i, rc) in body.result_columns.iter().enumerate() {
                 match rc {
                     ResultColumn::Expr { expr, .. } => {
-                        println!("compiling result column expr: {:?}", expr);
+                        trace!("compiling result column expr: {:?}", expr);
                         let r = self.compile_expr(expr, Some((cursor_id, &schema_cols)))?;
                         self.vm.emit(VdbeOp {
                             opcode: Opcode::Copy,
@@ -1224,10 +1226,10 @@ impl<'a> Compiler<'a> {
         expr: &Expr,
         cursor_ctx: Option<(usize, &[liter_ast::ColumnDef])>,
     ) -> CodegenResult<usize> {
-        println!("compile_expr: searching for expr: {:?}", expr);
-        println!("compile_expr: self.agg_regs: {:?}", self.agg_regs);
+        trace!("compile_expr: searching for expr: {:?}", expr);
+        trace!("compile_expr: self.agg_regs: {:?}", self.agg_regs);
         if let Some((_, reg)) = self.agg_regs.iter().find(|(e, _)| e == expr) {
-            println!("compile_expr: found in agg_regs! returning {}", reg);
+            trace!("compile_expr: found in agg_regs! returning {}", reg);
             return Ok(*reg);
         }
 

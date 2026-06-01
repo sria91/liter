@@ -11,6 +11,7 @@ liter-schema = { path = "../liter-schema" }
 liter-optimizer = { path = "../liter-optimizer" }
 liter-vdbe = { path = "../liter-vdbe" }
 thiserror.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 liter-parser = { path = "../liter-parser" }
