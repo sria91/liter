@@ -94,7 +94,7 @@ impl VfsFile for WinFile {
 mod platform {
     use super::*;
     use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::{BOOL, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         LockFileEx, UnlockFile, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
     };
@@ -102,39 +102,9 @@ mod platform {
 
     fn make_overlapped(offset: u64) -> OVERLAPPED {
         let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
-        // SAFETY: anonymous union; we are setting the offset fields directly.
-        unsafe {
-            ov.Anonymous.Anonymous.Offset = offset as u32;
-            ov.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-        }
+        ov.Anonymous.Anonymous.Offset = offset as u32;
+        ov.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
         ov
-    }
-
-    fn lock_range(handle: HANDLE, offset: u64, length: u64, exclusive: bool) -> io::Result<()> {
-        let flags = LOCKFILE_FAIL_IMMEDIATELY
-            | if exclusive {
-                LOCKFILE_EXCLUSIVE_LOCK
-            } else {
-                windows::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK
-                    ^ windows::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK
-            };
-        let mut ov = make_overlapped(offset);
-        // SAFETY: handle is a valid, open Windows file handle.
-        let result = unsafe {
-            LockFileEx(
-                handle,
-                flags,
-                0,
-                length as u32,
-                (length >> 32) as u32,
-                &mut ov,
-            )
-        };
-        if result.is_ok() {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
     }
 
     fn shared_lock_range(handle: HANDLE, offset: u64, length: u64) -> io::Result<()> {
@@ -197,7 +167,7 @@ mod platform {
     }
 
     pub fn acquire_lock(file: &File, target: LockLevel, current: LockLevel) -> io::Result<()> {
-        let handle = HANDLE(file.as_raw_handle() as isize);
+        let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
         match target {
             LockLevel::Shared if current < LockLevel::Shared => {
                 shared_lock_range(handle, SHARED_FIRST, 1)
@@ -224,7 +194,7 @@ mod platform {
     }
 
     pub fn release_lock(file: &File, target: LockLevel, current: LockLevel) -> io::Result<()> {
-        let handle = HANDLE(file.as_raw_handle() as isize);
+        let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
         if current >= LockLevel::Exclusive && target < LockLevel::Exclusive {
             unlock_range(handle, SHARED_FIRST, SHARED_SIZE)?;
             if target >= LockLevel::Shared {
@@ -245,7 +215,7 @@ mod platform {
     }
 
     pub fn check_reserved_lock(file: &File) -> io::Result<bool> {
-        let handle = HANDLE(file.as_raw_handle() as isize);
+        let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
         // Try a non-blocking exclusive lock on the reserved byte.
         // If it succeeds, nobody holds it → release and return false.
         // If it fails, someone holds it → return true.

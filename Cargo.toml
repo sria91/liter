@@ -71,7 +71,7 @@ arbitrary = { version = "1", features = ["derive"] }
 tempfile = "3"
 
 # C SQLite bindings (differential harness only)
-rusqlite = "0.32"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Bit flags
 bitflags = "2"

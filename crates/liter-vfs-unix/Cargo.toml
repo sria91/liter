@@ -10,11 +10,11 @@ liter-vfs = { path = "../liter-vfs" }
 thiserror.workspace = true
 memmap2.workspace = true
 bitflags.workspace = true
+getrandom.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # libc is needed for POSIX advisory locks
 libc = "0.2"
-getrandom = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

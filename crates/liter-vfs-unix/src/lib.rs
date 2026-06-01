@@ -20,9 +20,13 @@ use liter_vfs::{
 };
 
 /// SQLite lock-byte region offsets (must match C SQLite exactly).
+#[cfg(unix)]
 const PENDING_BYTE: i64 = 0x40000000;
+#[cfg(unix)]
 const RESERVED_BYTE: i64 = PENDING_BYTE + 1;
+#[cfg(unix)]
 const SHARED_FIRST: i64 = PENDING_BYTE + 2;
+#[cfg(unix)]
 const SHARED_SIZE: i64 = 510;
 
 pub struct UnixFile {
