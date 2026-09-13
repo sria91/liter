@@ -29,6 +29,13 @@ const SHARED_FIRST: i64 = PENDING_BYTE + 2;
 #[cfg(unix)]
 const SHARED_SIZE: i64 = 510;
 
+#[cfg(target_os = "macos")]
+type FcntlLockType = libc::c_short;
+#[cfg(target_os = "linux")]
+type FcntlLockType = libc::c_int;
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+type FcntlLockType = libc::c_short;
+
 pub struct UnixFile {
     file: File,
     lock: LockLevel,
@@ -154,12 +161,12 @@ impl VfsFile for UnixFile {
 #[cfg(unix)]
 fn fcntl_lock(
     fd: std::os::unix::io::RawFd,
-    lock_type: libc::c_int,
+    lock_type: FcntlLockType,
     start: i64,
     len: i64,
 ) -> io::Result<()> {
     let flock = libc::flock {
-        l_type: lock_type as _,
+        l_type: lock_type as libc::c_short,
         l_whence: libc::SEEK_SET as libc::c_short,
         l_start: start as libc::off_t,
         l_len: len as libc::off_t,
@@ -178,12 +185,12 @@ fn fcntl_lock(
 #[cfg(unix)]
 fn fcntl_has_lock(
     fd: std::os::unix::io::RawFd,
-    lock_type: libc::c_int,
+    lock_type: FcntlLockType,
     start: i64,
     len: i64,
 ) -> io::Result<bool> {
     let mut flock = libc::flock {
-        l_type: lock_type as _,
+        l_type: lock_type as libc::c_short,
         l_whence: libc::SEEK_SET as libc::c_short,
         l_start: start as libc::off_t,
         l_len: len as libc::off_t,
