@@ -26,6 +26,9 @@ parking_lot.workspace = true
 log.workspace = true
 liter-json = { version = "0.1.0", path = "../liter-json" }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 default = []
 wasm = ["dep:wasm-bindgen"]

@@ -1,5 +1,6 @@
 use liter_ast::*;
-use liter_parser::{parse_all, parse_stmt, ParseError};
+use liter_parser::{parse_all, parse_stmt, ParseError, Parser};
+use liter_tokenizer::Token;
 
 #[test]
 fn parse_select_basic() {
@@ -120,6 +121,106 @@ fn parse_delete() {
 }
 
 #[test]
+fn parse_transactions_and_savepoints() {
+    let cases = vec![
+        ("BEGIN;", Stmt::Begin(TransactionKind::Deferred)),
+        ("BEGIN DEFERRED TRANSACTION;", Stmt::Begin(TransactionKind::Deferred)),
+        ("BEGIN IMMEDIATE;", Stmt::Begin(TransactionKind::Immediate)),
+        ("BEGIN EXCLUSIVE TRANSACTION;", Stmt::Begin(TransactionKind::Exclusive)),
+        ("COMMIT;", Stmt::Commit),
+        ("COMMIT TRANSACTION;", Stmt::Commit),
+        ("ROLLBACK;", Stmt::Rollback { savepoint: None }),
+        ("ROLLBACK TRANSACTION;", Stmt::Rollback { savepoint: None }),
+        ("ROLLBACK TO sp1;", Stmt::Rollback { savepoint: Some("sp1".to_string()) }),
+        ("ROLLBACK TRANSACTION TO SAVEPOINT sp2;", Stmt::Rollback { savepoint: Some("sp2".to_string()) }),
+        ("SAVEPOINT sp3;", Stmt::Savepoint("sp3".to_string())),
+        ("RELEASE sp4;", Stmt::Release("sp4".to_string())),
+        ("RELEASE SAVEPOINT sp5;", Stmt::Release("sp5".to_string())),
+    ];
+
+    for (sql, expected) in cases {
+        let stmt = parse_stmt(sql).unwrap();
+        assert_eq!(stmt, expected, "Failed for SQL: {sql}");
+    }
+}
+
+#[test]
+fn parse_select_comprehensive() {
+    // SELECT DISTINCT / ALL, aliases without AS, multiple FROM tables with aliases
+    let sql = "SELECT DISTINCT a as col1, b col2, NULL, 3.14, * FROM t1 as table1, `t2` table2 WHERE a > 10 AND b < 5 AND c >= 2 GROUP BY a, b HAVING count(*) > 1 ORDER BY a ASC NULLS FIRST, b DESC NULLS LAST LIMIT 10 OFFSET 5;";
+    let stmts = parse_all(sql).unwrap();
+    assert_eq!(stmts.len(), 1);
+
+    let sql2 = "SELECT ALL 1 + 2 * 3 / 4 % 5, 10 - 2, (a == b) AND (c != d) OR (e <= f) FROM [t3] LIMIT 5, 10";
+    let stmts2 = parse_all(sql2).unwrap();
+    assert_eq!(stmts2.len(), 1);
+
+    let sql3 = "SELECT foo(), bar(x, y), count(*) FROM \"t4\" LIMIT 5";
+    let stmts3 = parse_all(sql3).unwrap();
+    assert_eq!(stmts3.len(), 1);
+}
+
+#[test]
+fn parse_select_orderby_default() {
+    let sql = "SELECT a FROM t1 ORDER BY a;";
+    let stmts = parse_all(sql).unwrap();
+    assert_eq!(stmts.len(), 1);
+
+    if let Stmt::Select(select) = &stmts[0] {
+        assert_eq!(select.order_by.len(), 1);
+        assert_eq!(select.order_by[0].nulls, NullsOrder::Default);
+    } else {
+        panic!("Expected Select statement");
+    }
+}
+
+#[test]
+fn parse_create_table_extended() {
+    let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY ASC AUTOINCREMENT, age 123 PRIMARY KEY DESC, name TEXT NOT NULL, score FLOAT);";
+    let stmts = parse_all(sql).unwrap();
+    assert_eq!(stmts.len(), 1);
+}
+
+#[test]
+fn parse_insert_update_delete_variants() {
+    let sql1 = "INSERT INTO users VALUES (1, 'Alice');";
+    let stmts1 = parse_all(sql1).unwrap();
+    assert_eq!(stmts1.len(), 1);
+
+    let sql2 = "UPDATE users SET name = 'Bob';";
+    let stmts2 = parse_all(sql2).unwrap();
+    assert_eq!(stmts2.len(), 1);
+
+    let sql3 = "DELETE FROM users;";
+    let stmts3 = parse_all(sql3).unwrap();
+    assert_eq!(stmts3.len(), 1);
+}
+
+#[test]
+fn parse_errors() {
+    // EOF error
+    assert!(matches!(parse_stmt(""), Err(ParseError::UnexpectedEof)));
+    assert!(matches!(parse_stmt("SELECT"), Err(ParseError::UnexpectedEof)));
+    assert!(matches!(parse_stmt("BEGIN DEFERRED"), Ok(Stmt::Begin(TransactionKind::Deferred))));
+
+    // Syntax errors
+    assert!(matches!(parse_stmt("SELECT 1 FROM t ORDER BY a NULLS FOO"), Err(ParseError::SyntaxError(_))));
+    assert!(matches!(parse_stmt("CREATE INDEX idx ON t(a)"), Err(ParseError::NotImplemented)));
+    assert!(matches!(parse_stmt("FOOBAR"), Err(ParseError::SyntaxError(_))));
+    assert!(matches!(parse_stmt("SELECT (1 + 2"), Err(ParseError::UnexpectedEof)));
+    assert!(matches!(parse_stmt("SELECT (1 + 2 +)"), Err(ParseError::SyntaxError(_))));
+    assert!(matches!(parse_stmt("INSERT INTO"), Err(ParseError::UnexpectedEof)));
+    assert!(matches!(parse_stmt("INSERT INTO 123"), Err(ParseError::SyntaxError(_))));
+    assert!(matches!(parse_stmt("CREATE TABLE"), Err(ParseError::UnexpectedEof)));
+    assert!(matches!(parse_stmt("CREATE TABLE t (id INT;"), Err(ParseError::SyntaxError(_))));
+    assert!(matches!(parse_stmt("UPDATE 123"), Err(ParseError::SyntaxError(_))));
+    assert!(matches!(parse_stmt("DELETE FROM 123"), Err(ParseError::SyntaxError(_))));
+
+    // Tokenizer / Lexer errors
+    assert!(matches!(parse_stmt("SELECT 'unclosed string"), Err(ParseError::TokenError(_))));
+}
+
+#[test]
 fn syntax_error_propagation() {
     let sql = "SELECT * FORM users"; // intentional typo 'FORM'
     let result = parse_all(sql);
@@ -130,4 +231,41 @@ fn syntax_error_propagation() {
     } else {
         panic!("Expected SyntaxError");
     }
+}
+
+#[test]
+fn test_internal_parser_methods() {
+    let parser = Parser::new("SELECT");
+    assert_eq!(parser.token_to_binary_op(&Token::Select), None);
+    assert_eq!(parser.token_to_binary_op(&Token::Plus), Some(BinaryOp::Add));
+
+    // Test consume on tokenizer error
+    let mut err_parser = Parser::new("'unclosed");
+    assert!(matches!(err_parser.consume(), Err(ParseError::TokenError(_))));
+
+    // Test expect with wrong token and EOF
+    let mut p = Parser::new("123");
+    assert!(matches!(p.expect(Token::Select), Err(ParseError::SyntaxError(_))));
+    let mut p_eof = Parser::new("");
+    assert!(matches!(p_eof.expect(Token::Select), Err(ParseError::UnexpectedEof)));
+
+    // Test expect_ident
+    let mut p_id = Parser::new("123");
+    assert!(matches!(p_id.expect_ident(), Err(ParseError::SyntaxError(_))));
+    let mut p_id_eof = Parser::new("");
+    assert!(matches!(p_id_eof.expect_ident(), Err(ParseError::UnexpectedEof)));
+}
+
+#[test]
+fn test_create_table_column_types() {
+    // Test column with no type, ident type, and integer type
+    let sql = "CREATE TABLE t (col1, col2 TEXT, col3 100);";
+    let stmt = parse_stmt(sql).unwrap();
+    let Stmt::Create(c) = stmt else { panic!("expected Create") };
+    let CreateStmt::Table(t) = *c else { panic!("expected Table") };
+    let CreateTableBody::Columns { columns, .. } = t.body else { panic!("expected Columns") };
+    assert_eq!(columns.len(), 3);
+    assert!(columns[0].type_name.is_none());
+    assert_eq!(columns[1].type_name.as_ref().unwrap().name, "TEXT");
+    assert_eq!(columns[2].type_name.as_ref().unwrap().name, "100");
 }

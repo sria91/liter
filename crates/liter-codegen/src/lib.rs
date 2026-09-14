@@ -449,7 +449,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn extract_aggregates(expr: &Expr, aggs: &mut Vec<Expr>) {
+    pub(crate) fn extract_aggregates(expr: &Expr, aggs: &mut Vec<Expr>) {
         let is_agg = match expr {
             Expr::Function { name, .. } => {
                 let n = name.to_ascii_lowercase();
@@ -514,7 +514,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn is_aggregate_query(body: &SimpleSelect) -> bool {
+    pub(crate) fn is_aggregate_query(body: &SimpleSelect) -> bool {
         if !body.group_by.is_empty() {
             return true;
         }
@@ -1297,6 +1297,36 @@ impl<'a> Compiler<'a> {
                             p5: 0,
                         });
                     }
+                    LiteralValue::CurrentDate => {
+                        self.vm.emit(VdbeOp {
+                            opcode: Opcode::Function,
+                            p1: 0,
+                            p2: 0,
+                            p3: r as i32,
+                            p4: P4::Text(Arc::from("date".to_string().into_boxed_str())),
+                            p5: 0,
+                        });
+                    }
+                    LiteralValue::CurrentTime => {
+                        self.vm.emit(VdbeOp {
+                            opcode: Opcode::Function,
+                            p1: 0,
+                            p2: 0,
+                            p3: r as i32,
+                            p4: P4::Text(Arc::from("time".to_string().into_boxed_str())),
+                            p5: 0,
+                        });
+                    }
+                    LiteralValue::CurrentTimestamp => {
+                        self.vm.emit(VdbeOp {
+                            opcode: Opcode::Function,
+                            p1: 0,
+                            p2: 0,
+                            p3: r as i32,
+                            p4: P4::Text(Arc::from("datetime".to_string().into_boxed_str())),
+                            p5: 0,
+                        });
+                    }
                     _ => return Err(CodegenError::NotImplemented),
                 }
                 Ok(r)
@@ -1400,6 +1430,11 @@ impl<'a> Compiler<'a> {
             }
 
             Expr::Unary {
+                op: liter_ast::UnaryOp::Plus,
+                operand,
+            } => self.compile_expr(operand, cursor_ctx),
+
+            Expr::Unary {
                 op: liter_ast::UnaryOp::Minus,
                 operand,
             } => {
@@ -1416,13 +1451,66 @@ impl<'a> Compiler<'a> {
                 });
                 self.vm.emit(VdbeOp {
                     opcode: Opcode::SubtractInt,
-                    p1: r as i32,
-                    p2: r_inner as i32,
+                    p1: r_inner as i32,
+                    p2: r as i32,
                     p3: r as i32,
                     p4: P4::None,
                     p5: 0,
                 });
                 Ok(r)
+            }
+
+            Expr::Unary {
+                op: liter_ast::UnaryOp::Not,
+                operand,
+            } => {
+                let r_inner = self.compile_expr(operand, cursor_ctx)?;
+                let r_res = self.vm.alloc_reg();
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::Integer,
+                    p1: 0,
+                    p2: r_res as i32,
+                    p3: 0,
+                    p4: P4::None,
+                    p5: 0,
+                });
+                let zero_reg = self.vm.alloc_reg();
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::Integer,
+                    p1: 0,
+                    p2: zero_reg as i32,
+                    p3: 0,
+                    p4: P4::None,
+                    p5: 0,
+                });
+                let jump_addr = self.vm.emit(VdbeOp {
+                    opcode: Opcode::Eq,
+                    p1: zero_reg as i32,
+                    p2: 0,
+                    p3: r_inner as i32,
+                    p4: P4::None,
+                    p5: 0,
+                });
+                let end_addr = self.vm.emit(VdbeOp {
+                    opcode: Opcode::Goto,
+                    p1: 0,
+                    p2: 0,
+                    p3: 0,
+                    p4: P4::None,
+                    p5: 0,
+                });
+                let true_addr = self.vm.emit(VdbeOp {
+                    opcode: Opcode::Integer,
+                    p1: 1,
+                    p2: r_res as i32,
+                    p3: 0,
+                    p4: P4::None,
+                    p5: 0,
+                });
+                let post_addr = self.vm.ops.len();
+                self.vm.ops[jump_addr].p2 = true_addr as i32;
+                self.vm.ops[end_addr].p2 = post_addr as i32;
+                Ok(r_res)
             }
 
             Expr::Function { name, args, .. } => {
@@ -1900,3 +1988,1003 @@ impl Compiler<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_aggregates_all_variants() {
+        let mut aggs = Vec::new();
+
+        let count_expr = Expr::Function {
+            schema: None,
+            name: "count".to_string(),
+            args: FunctionArgs::Star,
+            filter: None,
+            over: None,
+        };
+
+        let sum_expr = Expr::Function {
+            schema: None,
+            name: "sum".to_string(),
+            args: FunctionArgs::List(vec![Expr::Column {
+                schema: None,
+                table: None,
+                name: "col".to_string(),
+            }]),
+            filter: None,
+            over: None,
+        };
+
+        // 1. Direct aggregate
+        Compiler::extract_aggregates(&count_expr, &mut aggs);
+        assert_eq!(aggs.len(), 1);
+        // Duplicate detection
+        Compiler::extract_aggregates(&count_expr, &mut aggs);
+        assert_eq!(aggs.len(), 1);
+
+        // 2. Unary
+        let unary = Expr::Unary {
+            op: UnaryOp::Minus,
+            operand: Box::new(sum_expr.clone()),
+        };
+        Compiler::extract_aggregates(&unary, &mut aggs);
+        assert_eq!(aggs.len(), 2);
+
+        // 3. Binary
+        let binary = Expr::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(Expr::Function {
+                schema: None,
+                name: "avg".to_string(),
+                args: FunctionArgs::None,
+                filter: None,
+                over: None,
+            }),
+            right: Box::new(Expr::Function {
+                schema: None,
+                name: "min".to_string(),
+                args: FunctionArgs::None,
+                filter: None,
+                over: None,
+            }),
+        };
+        Compiler::extract_aggregates(&binary, &mut aggs);
+        assert_eq!(aggs.len(), 4);
+
+        // 4. Cast & Collate
+        let cast = Expr::Cast {
+            expr: Box::new(Expr::Function {
+                schema: None,
+                name: "max".to_string(),
+                args: FunctionArgs::None,
+                filter: None,
+                over: None,
+            }),
+            type_name: TypeName {
+                name: "TEXT".to_string(),
+                args: vec![],
+            },
+        };
+        Compiler::extract_aggregates(&cast, &mut aggs);
+        assert_eq!(aggs.len(), 5);
+
+        let collate = Expr::Collate {
+            expr: Box::new(Expr::Literal(LiteralValue::Null)),
+            collation: "NOCASE".to_string(),
+        };
+        Compiler::extract_aggregates(&collate, &mut aggs);
+        assert_eq!(aggs.len(), 5);
+
+        // 5. Like
+        let like = Expr::Like {
+            not: false,
+            op: LikeOp::Like,
+            lhs: Box::new(Expr::Literal(LiteralValue::Null)),
+            rhs: Box::new(Expr::Literal(LiteralValue::Null)),
+            escape: Some(Box::new(Expr::Literal(LiteralValue::Null))),
+        };
+        Compiler::extract_aggregates(&like, &mut aggs);
+
+        // 6. IsNull & Is
+        let is_null = Expr::IsNull {
+            not: true,
+            expr: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+        };
+        Compiler::extract_aggregates(&is_null, &mut aggs);
+
+        let is_expr = Expr::Is {
+            lhs: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+            rhs: Box::new(Expr::Literal(LiteralValue::Null)),
+            not: false,
+        };
+        Compiler::extract_aggregates(&is_expr, &mut aggs);
+
+        // 7. Between & In
+        let between = Expr::Between {
+            expr: Box::new(Expr::Literal(LiteralValue::Integer(5))),
+            low: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+            high: Box::new(Expr::Literal(LiteralValue::Integer(10))),
+            not: false,
+        };
+        Compiler::extract_aggregates(&between, &mut aggs);
+
+        let in_expr = Expr::In {
+            not: true,
+            expr: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+            rhs: InRhs::List(vec![]),
+        };
+        Compiler::extract_aggregates(&in_expr, &mut aggs);
+
+        // 8. Case & RowValue
+        let case_expr = Expr::Case {
+            base: Some(Box::new(Expr::Literal(LiteralValue::Integer(1)))),
+            arms: vec![CaseArm {
+                when: Expr::Literal(LiteralValue::Integer(1)),
+                then: Expr::Literal(LiteralValue::Text("one".to_string())),
+            }],
+            else_: Some(Box::new(Expr::Literal(LiteralValue::Null))),
+        };
+        Compiler::extract_aggregates(&case_expr, &mut aggs);
+
+        let row_val = Expr::RowValue(vec![Expr::Literal(LiteralValue::Integer(42))]);
+        Compiler::extract_aggregates(&row_val, &mut aggs);
+    }
+
+    #[test]
+    fn test_is_aggregate_query() {
+        let simple_non_agg = SimpleSelect {
+            distinct: DistinctKind::All,
+            result_columns: vec![ResultColumn::Star],
+            from: None,
+            where_: None,
+            group_by: vec![],
+            having: None,
+            window: vec![],
+        };
+        assert!(!Compiler::is_aggregate_query(&simple_non_agg));
+
+        let with_group_by = SimpleSelect {
+            group_by: vec![Expr::Literal(LiteralValue::Integer(1))],
+            ..simple_non_agg.clone()
+        };
+        assert!(Compiler::is_aggregate_query(&with_group_by));
+
+        let with_having = SimpleSelect {
+            having: Some(Expr::Literal(LiteralValue::Integer(1))),
+            ..simple_non_agg.clone()
+        };
+        assert!(Compiler::is_aggregate_query(&with_having));
+
+        let with_agg_col = SimpleSelect {
+            result_columns: vec![ResultColumn::Expr {
+                expr: Expr::Function {
+                    schema: None,
+                    name: "COUNT".to_string(),
+                    args: FunctionArgs::Star,
+                    filter: None,
+                    over: None,
+                },
+                alias: None,
+            }],
+            ..simple_non_agg
+        };
+        assert!(Compiler::is_aggregate_query(&with_agg_col));
+    }
+
+    fn create_test_schema() -> liter_schema::Schema {
+        let schema = liter_schema::Schema::new();
+        schema.insert(liter_schema::SchemaObject {
+            kind: liter_schema::ObjectKind::Table,
+            name: "users".to_owned(),
+            tbl_name: "users".to_owned(),
+            root_page: 2,
+            sql: Some("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)".to_owned()),
+            columns: vec![
+                liter_ast::ColumnDef {
+                    name: "id".to_string(),
+                    type_name: None,
+                    constraints: vec![],
+                },
+                liter_ast::ColumnDef {
+                    name: "name".to_string(),
+                    type_name: None,
+                    constraints: vec![],
+                },
+                liter_ast::ColumnDef {
+                    name: "age".to_string(),
+                    type_name: None,
+                    constraints: vec![],
+                },
+            ],
+        });
+        schema
+    }
+
+    #[test]
+    fn test_compile_datetime_literals() {
+        let mut compiler = Compiler::new();
+        let r1 = compiler.compile_expr(&Expr::Literal(LiteralValue::CurrentDate), None).unwrap();
+        let r2 = compiler.compile_expr(&Expr::Literal(LiteralValue::CurrentTime), None).unwrap();
+        let r3 = compiler.compile_expr(&Expr::Literal(LiteralValue::CurrentTimestamp), None).unwrap();
+        assert_eq!(r1, 0);
+        assert_eq!(r2, 1);
+        assert_eq!(r3, 2);
+        assert_eq!(compiler.vm.ops.len(), 3);
+        assert_eq!(compiler.vm.ops[0].opcode, Opcode::Function);
+        assert_eq!(compiler.vm.ops[1].opcode, Opcode::Function);
+        assert_eq!(compiler.vm.ops[2].opcode, Opcode::Function);
+    }
+
+    #[test]
+    fn test_compile_is_null_predicates() {
+        let mut compiler = Compiler::new();
+        let is_null_expr = Expr::IsNull {
+            not: false,
+            expr: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+        };
+        let is_not_null_expr = Expr::IsNull {
+            not: true,
+            expr: Box::new(Expr::Literal(LiteralValue::Integer(2))),
+        };
+        let addrs1 = compiler.compile_where_expr(&is_null_expr, None).unwrap();
+        let addrs2 = compiler.compile_where_expr(&is_not_null_expr, None).unwrap();
+        assert_eq!(addrs1.len(), 1);
+        assert_eq!(addrs2.len(), 1);
+    }
+
+    #[test]
+    fn test_compile_where_pred_fallback() {
+        let mut compiler = Compiler::new();
+        // Function expr as a where predicate exercises the `_` fallback arm
+        let pred = Expr::Function {
+            schema: None,
+            name: "random".to_string(),
+            args: FunctionArgs::None,
+            filter: None,
+            over: None,
+        };
+        let addrs = compiler.compile_where_expr(&pred, None).unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(compiler.vm.ops.last().unwrap().opcode, Opcode::IfNot);
+    }
+
+    #[test]
+    fn test_compile_delete_statements() {
+        let schema = create_test_schema();
+
+        // 1. DELETE without WHERE
+        let delete_all = DeleteStmt {
+            with: None,
+            table: QualifiedTable {
+                schema: None,
+                name: "users".to_string(),
+                alias: None,
+                indexed: IndexedKind::None,
+            },
+            where_: None,
+            returning: vec![],
+        };
+        let mut c1 = Compiler::with_schema(&schema);
+        assert!(c1.compile_delete(&delete_all).is_ok());
+
+        // 2. DELETE with WHERE
+        let delete_where = DeleteStmt {
+            with: None,
+            table: QualifiedTable {
+                schema: None,
+                name: "users".to_string(),
+                alias: None,
+                indexed: IndexedKind::None,
+            },
+            where_: Some(Expr::Binary {
+                op: BinaryOp::Eq,
+                left: Box::new(Expr::Column {
+                    schema: None,
+                    table: None,
+                    name: "id".to_string(),
+                }),
+                right: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+            }),
+            returning: vec![],
+        };
+        let mut c2 = Compiler::with_schema(&schema);
+        assert!(c2.compile_delete(&delete_where).is_ok());
+
+        // 3. DELETE error - no schema context
+        let mut c_no_schema = Compiler::new();
+        assert!(matches!(
+            c_no_schema.compile_delete(&delete_all),
+            Err(CodegenError::Schema(_))
+        ));
+
+        // 4. DELETE error - table not found
+        let delete_unknown = DeleteStmt {
+            with: None,
+            table: QualifiedTable {
+                schema: None,
+                name: "nonexistent".to_string(),
+                alias: None,
+                indexed: IndexedKind::None,
+            },
+            where_: None,
+            returning: vec![],
+        };
+        let mut c3 = Compiler::with_schema(&schema);
+        assert!(matches!(
+            c3.compile_delete(&delete_unknown),
+            Err(CodegenError::Schema(_))
+        ));
+    }
+
+    #[test]
+    fn test_compile_update_statements() {
+        let schema = create_test_schema();
+
+        // 1. UPDATE without WHERE
+        let update_all = UpdateStmt {
+            with: None,
+            or: None,
+            table: QualifiedTable {
+                schema: None,
+                name: "users".to_string(),
+                alias: None,
+                indexed: IndexedKind::None,
+            },
+            assignments: vec![
+                Assignment {
+                    columns: vec!["age".to_string()],
+                    value: Expr::Literal(LiteralValue::Integer(25)),
+                },
+                Assignment {
+                    columns: vec!["name".to_string()],
+                    value: Expr::Literal(LiteralValue::Text("updated".to_string())),
+                },
+            ],
+            from: None,
+            where_: None,
+            returning: vec![],
+        };
+        let mut c1 = Compiler::with_schema(&schema);
+        assert!(c1.compile_update(&update_all).is_ok());
+
+        // 2. UPDATE with WHERE
+        let update_where = UpdateStmt {
+            with: None,
+            or: None,
+            table: QualifiedTable {
+                schema: None,
+                name: "users".to_string(),
+                alias: None,
+                indexed: IndexedKind::None,
+            },
+            assignments: vec![Assignment {
+                columns: vec!["age".to_string()],
+                value: Expr::Literal(LiteralValue::Integer(30)),
+            }],
+            from: None,
+            where_: Some(Expr::Binary {
+                op: BinaryOp::Eq,
+                left: Box::new(Expr::Column {
+                    schema: None,
+                    table: None,
+                    name: "id".to_string(),
+                }),
+                right: Box::new(Expr::Literal(LiteralValue::Integer(10))),
+            }),
+            returning: vec![],
+        };
+        let mut c2 = Compiler::with_schema(&schema);
+        assert!(c2.compile_update(&update_where).is_ok());
+
+        // 3. UPDATE error - no schema context
+        let mut c_no_schema = Compiler::new();
+        assert!(matches!(
+            c_no_schema.compile_update(&update_all),
+            Err(CodegenError::Schema(_))
+        ));
+
+        // 4. UPDATE error - table not found
+        let update_unknown_table = UpdateStmt {
+            table: QualifiedTable {
+                schema: None,
+                name: "nonexistent".to_string(),
+                alias: None,
+                indexed: IndexedKind::None,
+            },
+            ..update_all.clone()
+        };
+        let mut c3 = Compiler::with_schema(&schema);
+        assert!(matches!(
+            c3.compile_update(&update_unknown_table),
+            Err(CodegenError::Schema(_))
+        ));
+
+        // 5. UPDATE error - column not found
+        let update_unknown_col = UpdateStmt {
+            assignments: vec![Assignment {
+                columns: vec!["nonexistent".to_string()],
+                value: Expr::Literal(LiteralValue::Integer(1)),
+            }],
+            ..update_all.clone()
+        };
+        let mut c4 = Compiler::with_schema(&schema);
+        assert!(matches!(
+            c4.compile_update(&update_unknown_col),
+            Err(CodegenError::Schema(_))
+        ));
+
+        // 6. UPDATE error - empty assignment
+        let update_empty_assignment = UpdateStmt {
+            assignments: vec![Assignment {
+                columns: vec![],
+                value: Expr::Literal(LiteralValue::Integer(1)),
+            }],
+            ..update_all
+        };
+        let mut c5 = Compiler::with_schema(&schema);
+        assert!(matches!(
+            c5.compile_update(&update_empty_assignment),
+            Err(CodegenError::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn test_compile_expr_all_binary_and_unary() {
+        let mut compiler = Compiler::new();
+        let schema = create_test_schema();
+        let table = schema.get("users").unwrap();
+        let cursor_ctx = Some((0, table.columns.as_slice()));
+
+        // Arithmetic binary ops
+        let add_expr = Expr::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(Expr::Literal(LiteralValue::Integer(10))),
+            right: Box::new(Expr::Literal(LiteralValue::Integer(5))),
+        };
+        let sub_expr = Expr::Binary {
+            op: BinaryOp::Sub,
+            left: Box::new(Expr::Literal(LiteralValue::Integer(10))),
+            right: Box::new(Expr::Literal(LiteralValue::Integer(5))),
+        };
+        let mul_expr = Expr::Binary {
+            op: BinaryOp::Mul,
+            left: Box::new(Expr::Literal(LiteralValue::Integer(10))),
+            right: Box::new(Expr::Literal(LiteralValue::Integer(5))),
+        };
+        let div_expr = Expr::Binary {
+            op: BinaryOp::Div,
+            left: Box::new(Expr::Literal(LiteralValue::Integer(10))),
+            right: Box::new(Expr::Literal(LiteralValue::Integer(5))),
+        };
+        let mod_expr = Expr::Binary {
+            op: BinaryOp::Mod,
+            left: Box::new(Expr::Literal(LiteralValue::Integer(10))),
+            right: Box::new(Expr::Literal(LiteralValue::Integer(5))),
+        };
+        assert!(compiler.compile_expr(&add_expr, None).is_ok());
+        assert!(compiler.compile_expr(&sub_expr, None).is_ok());
+        assert!(compiler.compile_expr(&mul_expr, None).is_ok());
+        assert!(compiler.compile_expr(&div_expr, None).is_ok());
+        assert!(compiler.compile_expr(&mod_expr, None).is_ok());
+
+        // Comparison binary ops
+        let ops = [
+            BinaryOp::Eq,
+            BinaryOp::Ne,
+            BinaryOp::Lt,
+            BinaryOp::Le,
+            BinaryOp::Gt,
+            BinaryOp::Ge,
+        ];
+        for op in ops {
+            let comp_expr = Expr::Binary {
+                op,
+                left: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+                right: Box::new(Expr::Literal(LiteralValue::Integer(2))),
+            };
+            assert!(compiler.compile_expr(&comp_expr, None).is_ok());
+        }
+
+        // Unsupported binary op
+        let concat_expr = Expr::Binary {
+            op: BinaryOp::Concat,
+            left: Box::new(Expr::Literal(LiteralValue::Text("a".to_string()))),
+            right: Box::new(Expr::Literal(LiteralValue::Text("b".to_string()))),
+        };
+        assert!(matches!(
+            compiler.compile_expr(&concat_expr, None),
+            Err(CodegenError::NotImplemented)
+        ));
+
+        // Unary ops
+        let plus_expr = Expr::Unary {
+            op: UnaryOp::Plus,
+            operand: Box::new(Expr::Literal(LiteralValue::Integer(42))),
+        };
+        let minus_expr = Expr::Unary {
+            op: UnaryOp::Minus,
+            operand: Box::new(Expr::Literal(LiteralValue::Integer(42))),
+        };
+        let not_expr = Expr::Unary {
+            op: UnaryOp::Not,
+            operand: Box::new(Expr::Literal(LiteralValue::Integer(0))),
+        };
+        let bitnot_expr = Expr::Unary {
+            op: UnaryOp::BitNot,
+            operand: Box::new(Expr::Literal(LiteralValue::Integer(42))),
+        };
+        assert!(compiler.compile_expr(&plus_expr, None).is_ok());
+        assert!(compiler.compile_expr(&minus_expr, None).is_ok());
+        assert!(compiler.compile_expr(&not_expr, None).is_ok());
+        assert!(matches!(
+            compiler.compile_expr(&bitnot_expr, None),
+            Err(CodegenError::NotImplemented)
+        ));
+
+        // Literal Null, False, and unsupported variant (Blob)
+        assert!(compiler
+            .compile_expr(&Expr::Literal(LiteralValue::Null), None)
+            .is_ok());
+        assert!(compiler
+            .compile_expr(&Expr::Literal(LiteralValue::False), None)
+            .is_ok());
+        assert!(matches!(
+            compiler.compile_expr(&Expr::Literal(LiteralValue::Blob(vec![1, 2, 3])), None),
+            Err(CodegenError::NotImplemented)
+        ));
+
+        // Column expr without cursor context
+        let col_expr = Expr::Column {
+            schema: None,
+            table: None,
+            name: "id".to_string(),
+        };
+        assert!(matches!(
+            compiler.compile_expr(&col_expr, None),
+            Err(CodegenError::Schema(_))
+        ));
+
+        // Column expr with cursor context - valid
+        assert!(compiler.compile_expr(&col_expr, cursor_ctx).is_ok());
+
+        // Column expr with cursor context - invalid column name
+        let col_unknown = Expr::Column {
+            schema: None,
+            table: None,
+            name: "nonexistent".to_string(),
+        };
+        assert!(matches!(
+            compiler.compile_expr(&col_unknown, cursor_ctx),
+            Err(CodegenError::Schema(_))
+        ));
+
+        // Functions
+        let count_star = Expr::Function {
+            schema: None,
+            name: "count".to_string(),
+            args: FunctionArgs::Star,
+            filter: None,
+            over: None,
+        };
+        let rand_no_args = Expr::Function {
+            schema: None,
+            name: "random".to_string(),
+            args: FunctionArgs::None,
+            filter: None,
+            over: None,
+        };
+        let substr_multi_args = Expr::Function {
+            schema: None,
+            name: "substr".to_string(),
+            args: FunctionArgs::List(vec![
+                Expr::Literal(LiteralValue::Text("hello".to_string())),
+                Expr::Literal(LiteralValue::Integer(1)),
+                Expr::Literal(LiteralValue::Integer(2)),
+            ]),
+            filter: None,
+            over: None,
+        };
+        let distinct_func = Expr::Function {
+            schema: None,
+            name: "count".to_string(),
+            args: FunctionArgs::Distinct(vec![
+                Expr::Literal(LiteralValue::Integer(1)),
+                Expr::Literal(LiteralValue::Integer(2)),
+            ]),
+            filter: None,
+            over: None,
+        };
+        assert!(compiler.compile_expr(&count_star, None).is_ok());
+        assert!(compiler.compile_expr(&rand_no_args, None).is_ok());
+        assert!(compiler.compile_expr(&substr_multi_args, None).is_ok());
+        assert!(compiler.compile_expr(&distinct_func, None).is_ok());
+
+        // Unsupported expr (e.g. Cast)
+        let cast_expr = Expr::Cast {
+            expr: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+            type_name: TypeName {
+                name: "TEXT".to_string(),
+                args: vec![],
+            },
+        };
+        assert!(matches!(
+            compiler.compile_expr(&cast_expr, None),
+            Err(CodegenError::NotImplemented)
+        ));
+    }
+
+    #[test]
+    fn test_compile_create_and_insert_statements() {
+        let schema = create_test_schema();
+
+        // 1. CREATE TABLE
+        let create_stmt = Stmt::Create(Box::new(CreateStmt::Table(CreateTable {
+            temp: false,
+            if_not_exists: true,
+            schema: None,
+            name: "test_table".to_string(),
+            body: CreateTableBody::Columns {
+                columns: vec![ColumnDef {
+                    name: "id".to_string(),
+                    type_name: None,
+                    constraints: vec![],
+                }],
+                constraints: vec![],
+            },
+            options: TableOptions::default(),
+        })));
+        let res1 = compile(&create_stmt);
+        assert!(res1.is_ok());
+        let res2 = compile_with_schema(&create_stmt, &schema);
+        assert!(res2.is_ok());
+
+        // 2. INSERT statement - normal values
+        let insert_normal = InsertStmt {
+            with: None,
+            or: None,
+            schema: None,
+            table: "users".to_string(),
+            alias: None,
+            columns: vec!["id".to_string(), "name".to_string(), "age".to_string()],
+            source: InsertSource::Values(vec![
+                vec![
+                    Expr::Literal(LiteralValue::Integer(1)),
+                    Expr::Literal(LiteralValue::Text("Alice".to_string())),
+                    Expr::Literal(LiteralValue::Integer(30)),
+                ],
+                vec![], // Empty row to exercise `if regs.is_empty() { continue; }`
+                vec![
+                    Expr::Literal(LiteralValue::Integer(2)),
+                    Expr::Literal(LiteralValue::Text("Bob".to_string())),
+                    Expr::Literal(LiteralValue::Integer(25)),
+                ],
+            ]),
+            returning: vec![],
+        };
+        let mut c_ins = Compiler::with_schema(&schema);
+        assert!(c_ins.compile_insert(&insert_normal).is_ok());
+
+        // 3. INSERT - unsupported source
+        let insert_default_values = InsertStmt {
+            source: InsertSource::DefaultValues,
+            ..insert_normal.clone()
+        };
+        assert!(matches!(
+            c_ins.compile_insert(&insert_default_values),
+            Err(CodegenError::NotImplemented)
+        ));
+
+        // 4. INSERT - no schema
+        let mut c_no_schema = Compiler::new();
+        assert!(matches!(
+            c_no_schema.compile_insert(&insert_normal),
+            Err(CodegenError::Schema(_))
+        ));
+
+        // 5. INSERT - table not found
+        let insert_unknown = InsertStmt {
+            table: "nonexistent".to_string(),
+            ..insert_normal
+        };
+        assert!(matches!(
+            c_ins.compile_insert(&insert_unknown),
+            Err(CodegenError::Schema(_))
+        ));
+    }
+
+    #[test]
+    fn test_compile_select_edge_cases_and_options() {
+        let schema = create_test_schema();
+
+        // 1. SELECT with unknown column
+        let select_bad_col = SelectStmt {
+            with: None,
+            body: SelectBody::Simple(SimpleSelect {
+                distinct: DistinctKind::All,
+                result_columns: vec![ResultColumn::Expr {
+                    expr: Expr::Column {
+                        schema: None,
+                        table: None,
+                        name: "nonexistent".to_string(),
+                    },
+                    alias: None,
+                }],
+                from: Some(FromClause {
+                    tables: vec![TableOrSubquery::Table {
+                        schema: None,
+                        name: "users".to_string(),
+                        alias: None,
+                        indexed: IndexedKind::None,
+                    }],
+                    joins: vec![],
+                }),
+                where_: None,
+                group_by: vec![],
+                having: None,
+                window: vec![],
+            }),
+            order_by: vec![],
+            limit: None,
+        };
+        let mut c1 = Compiler::with_schema(&schema);
+        assert!(matches!(
+            c1.compile_select(&select_bad_col),
+            Err(CodegenError::Schema(_))
+        ));
+
+        // 2. SELECT with computed ResultColumn::Expr (e.g. 1 + 2)
+        let select_computed = SelectStmt {
+            with: None,
+            body: SelectBody::Simple(SimpleSelect {
+                distinct: DistinctKind::All,
+                result_columns: vec![ResultColumn::Expr {
+                    expr: Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+                        right: Box::new(Expr::Literal(LiteralValue::Integer(2))),
+                    },
+                    alias: None,
+                }],
+                from: Some(FromClause {
+                    tables: vec![TableOrSubquery::Table {
+                        schema: None,
+                        name: "users".to_string(),
+                        alias: None,
+                        indexed: IndexedKind::None,
+                    }],
+                    joins: vec![],
+                }),
+                where_: None,
+                group_by: vec![],
+                having: None,
+                window: vec![],
+            }),
+            order_by: vec![],
+            limit: None,
+        };
+        let mut c2 = Compiler::with_schema(&schema);
+        assert!(c2.compile_select(&select_computed).is_ok());
+
+        // 3. SELECT with order_by and limit
+        let select_order_limit = SelectStmt {
+            with: None,
+            body: SelectBody::Simple(SimpleSelect {
+                distinct: DistinctKind::All,
+                result_columns: vec![ResultColumn::Star],
+                from: Some(FromClause {
+                    tables: vec![TableOrSubquery::Table {
+                        schema: None,
+                        name: "users".to_string(),
+                        alias: None,
+                        indexed: IndexedKind::None,
+                    }],
+                    joins: vec![],
+                }),
+                where_: None,
+                group_by: vec![],
+                having: None,
+                window: vec![],
+            }),
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column {
+                    schema: None,
+                    table: None,
+                    name: "id".to_string(),
+                },
+                direction: SortDirection::Asc,
+                nulls: NullsOrder::Default,
+            }],
+            limit: Some(LimitClause {
+                limit: Expr::Literal(LiteralValue::Integer(5)),
+                offset: None,
+            }),
+        };
+        let mut c3 = Compiler::with_schema(&schema);
+        assert!(c3.compile_select(&select_order_limit).is_ok());
+
+        // 4. SELECT TableStar: users.*
+        let select_table_star = SelectStmt {
+            with: None,
+            body: SelectBody::Simple(SimpleSelect {
+                distinct: DistinctKind::All,
+                result_columns: vec![ResultColumn::TableStar("users".to_string())],
+                from: Some(FromClause {
+                    tables: vec![TableOrSubquery::Table {
+                        schema: None,
+                        name: "users".to_string(),
+                        alias: None,
+                        indexed: IndexedKind::None,
+                    }],
+                    joins: vec![],
+                }),
+                where_: None,
+                group_by: vec![],
+                having: None,
+                window: vec![],
+            }),
+            order_by: vec![],
+            limit: None,
+        };
+        let mut c4 = Compiler::with_schema(&schema);
+        assert!(c4.compile_select(&select_table_star).is_ok());
+
+        // 5. Aggregate SELECT with multi-arg and distinct functions, with GROUP BY and HAVING
+        let select_agg_group = SelectStmt {
+            with: None,
+            body: SelectBody::Simple(SimpleSelect {
+                distinct: DistinctKind::All,
+                result_columns: vec![
+                    ResultColumn::Expr {
+                        expr: Expr::Column {
+                            schema: None,
+                            table: None,
+                            name: "age".to_string(),
+                        },
+                        alias: None,
+                    },
+                    ResultColumn::Expr {
+                        expr: Expr::Function {
+                            schema: None,
+                            name: "group_concat".to_string(),
+                            args: FunctionArgs::List(vec![
+                                Expr::Column {
+                                    schema: None,
+                                    table: None,
+                                    name: "name".to_string(),
+                                },
+                                Expr::Literal(LiteralValue::Text(",".to_string())),
+                            ]),
+                            filter: None,
+                            over: None,
+                        },
+                        alias: None,
+                    },
+                    ResultColumn::Expr {
+                        expr: Expr::Function {
+                            schema: None,
+                            name: "count".to_string(),
+                            args: FunctionArgs::Distinct(vec![Expr::Column {
+                                schema: None,
+                                table: None,
+                                name: "id".to_string(),
+                            }]),
+                            filter: None,
+                            over: None,
+                        },
+                        alias: None,
+                    },
+                ],
+                from: Some(FromClause {
+                    tables: vec![TableOrSubquery::Table {
+                        schema: None,
+                        name: "users".to_string(),
+                        alias: None,
+                        indexed: IndexedKind::None,
+                    }],
+                    joins: vec![],
+                }),
+                where_: None,
+                group_by: vec![Expr::Column {
+                    schema: None,
+                    table: None,
+                    name: "age".to_string(),
+                }],
+                having: Some(Expr::Binary {
+                    op: BinaryOp::Gt,
+                    left: Box::new(Expr::Function {
+                        schema: None,
+                        name: "count".to_string(),
+                        args: FunctionArgs::Star,
+                        filter: None,
+                        over: None,
+                    }),
+                    right: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+                }),
+                window: vec![],
+            }),
+            order_by: vec![],
+            limit: None,
+        };
+        let mut c5 = Compiler::with_schema(&schema);
+        assert!(c5.compile_select(&select_agg_group).is_ok());
+
+        // 6. Aggregate SELECT with non-group by and multi-arg aggregate
+        let select_agg_non_group = SelectStmt {
+            with: None,
+            body: SelectBody::Simple(SimpleSelect {
+                distinct: DistinctKind::All,
+                result_columns: vec![ResultColumn::Expr {
+                    expr: Expr::Function {
+                        schema: None,
+                        name: "group_concat".to_string(),
+                        args: FunctionArgs::Distinct(vec![
+                            Expr::Column {
+                                schema: None,
+                                table: None,
+                                name: "name".to_string(),
+                            },
+                            Expr::Literal(LiteralValue::Text("-".to_string())),
+                        ]),
+                        filter: None,
+                        over: None,
+                    },
+                    alias: None,
+                }],
+                from: Some(FromClause {
+                    tables: vec![TableOrSubquery::Table {
+                        schema: None,
+                        name: "users".to_string(),
+                        alias: None,
+                        indexed: IndexedKind::None,
+                    }],
+                    joins: vec![],
+                }),
+                where_: None,
+                group_by: vec![],
+                having: None,
+                window: vec![],
+            }),
+            order_by: vec![],
+            limit: None,
+        };
+        let mut c6 = Compiler::with_schema(&schema);
+        assert!(c6.compile_select(&select_agg_non_group).is_ok());
+
+        // 7. Aggregate SELECT with GROUP BY and ResultColumn::Star -> NotImplemented error
+        let select_agg_star = SelectStmt {
+            with: None,
+            body: SelectBody::Simple(SimpleSelect {
+                distinct: DistinctKind::All,
+                result_columns: vec![ResultColumn::Star],
+                from: Some(FromClause {
+                    tables: vec![TableOrSubquery::Table {
+                        schema: None,
+                        name: "users".to_string(),
+                        alias: None,
+                        indexed: IndexedKind::None,
+                    }],
+                    joins: vec![],
+                }),
+                where_: None,
+                group_by: vec![Expr::Column {
+                    schema: None,
+                    table: None,
+                    name: "age".to_string(),
+                }],
+                having: None,
+                window: vec![],
+            }),
+            order_by: vec![],
+            limit: None,
+        };
+        let mut c7 = Compiler::with_schema(&schema);
+        assert!(matches!(
+            c7.compile_select(&select_agg_star),
+            Err(CodegenError::NotImplemented)
+        ));
+    }
+}
+
+

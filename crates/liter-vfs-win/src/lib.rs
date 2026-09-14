@@ -309,3 +309,123 @@ impl Vfs for WinVfs {
         "win32"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(PENDING_BYTE, 0x40000000);
+        assert_eq!(RESERVED_BYTE, 0x40000001);
+        assert_eq!(SHARED_FIRST, 0x40000002);
+        assert_eq!(SHARED_SIZE, 510);
+    }
+
+    #[test]
+    fn test_vfs_lifecycle_and_file_operations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_win_vfs.db");
+        let vfs = WinVfs;
+
+        assert_eq!(vfs.name(), "win32");
+        assert!(!vfs.access(&path, AccessFlags::EXISTS).unwrap());
+
+        let mut file = vfs
+            .open(&path, OpenFlags::CREATE | OpenFlags::READ_WRITE)
+            .unwrap();
+
+        assert!(vfs.access(&path, AccessFlags::EXISTS).unwrap());
+        assert_eq!(file.device_characteristics(), DeviceCharacteristics::UNDELETABLE_WHEN_OPEN);
+        assert_eq!(file.sector_size(), 4096);
+
+        // Write and read
+        file.write(b"hello world", 0).unwrap();
+        assert_eq!(file.file_size().unwrap(), 11);
+
+        let mut buf = [0u8; 5];
+        let n = file.read(&mut buf, 0).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"hello");
+
+        // Write at offset
+        file.write(b"rust", 6).unwrap();
+        let mut full_buf = [0u8; 11];
+        file.read(&mut full_buf, 0).unwrap();
+        assert_eq!(&full_buf, b"hello rustd");
+
+        // Truncate
+        file.truncate(5).unwrap();
+        assert_eq!(file.file_size().unwrap(), 5);
+
+        // Sync
+        file.sync(SyncFlags::NORMAL).unwrap();
+        file.sync(SyncFlags::FULL).unwrap();
+
+        // Lock transitions
+        assert_eq!(file.check_reserved_lock().unwrap(), false);
+
+        // Escalating locks
+        file.lock(LockLevel::Shared).unwrap();
+        file.lock(LockLevel::Shared).unwrap(); // no-op
+        file.lock(LockLevel::Reserved).unwrap();
+        file.lock(LockLevel::Pending).unwrap();
+        file.lock(LockLevel::Exclusive).unwrap();
+        file.lock(LockLevel::Exclusive).unwrap(); // no-op
+
+        // Releasing locks
+        file.unlock(LockLevel::Exclusive).unwrap(); // no-op
+        file.unlock(LockLevel::Pending).unwrap();
+        file.unlock(LockLevel::Reserved).unwrap();
+        file.unlock(LockLevel::Shared).unwrap();
+        file.unlock(LockLevel::None).unwrap();
+        file.unlock(LockLevel::None).unwrap(); // no-op
+
+        drop(file);
+
+        // Read-only open
+        let mut ro_file = vfs.open(&path, OpenFlags::READ_ONLY).unwrap();
+        let mut ro_buf = [0u8; 5];
+        assert_eq!(ro_file.read(&mut ro_buf, 0).unwrap(), 5);
+        assert_eq!(&ro_buf, b"hello");
+        drop(ro_file);
+
+        // Full pathname
+        let full = vfs.full_pathname(&path).unwrap();
+        assert!(full.is_absolute());
+
+        // Delete
+        vfs.delete(&path, false).unwrap();
+        assert!(!vfs.access(&path, AccessFlags::EXISTS).unwrap());
+    }
+
+    #[test]
+    fn test_vfs_randomness_sleep_and_time() {
+        let vfs = WinVfs;
+
+        let mut buf = [0u8; 32];
+        vfs.randomness(&mut buf);
+        assert!(buf.iter().any(|&b| b != 0));
+
+        vfs.sleep(100);
+
+        let t = vfs.current_time();
+        assert!(t > 2440587.5);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_non_windows_platform_stubs() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("stub_test.db");
+        let vfs = WinVfs;
+        let file = vfs
+            .open(&path, OpenFlags::CREATE | OpenFlags::READ_WRITE)
+            .unwrap();
+
+        assert!(platform::acquire_lock(&file.file, LockLevel::Shared, LockLevel::None).is_ok());
+        assert!(platform::release_lock(&file.file, LockLevel::None, LockLevel::Shared).is_ok());
+        assert_eq!(platform::check_reserved_lock(&file.file).unwrap(), false);
+    }
+}

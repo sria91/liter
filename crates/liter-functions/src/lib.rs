@@ -85,7 +85,10 @@ impl liter_vdbe::AggregateState for SumState {
                 Some(Mem::Real(acc)) => {
                     self.sum = Some(Mem::Real(*acc + val.to_real().unwrap_or(0.0)));
                 }
-                _ => {}
+                // Accumulator is only ever None / Int / Real (see above), so
+                // this arm is unreachable in practice — but required for
+                // exhaustiveness.
+                Some(_) => {}
             }
         }
         Ok(())
@@ -187,6 +190,7 @@ pub fn dispatch_function(name: &str, args: &[Mem]) -> FuncResult<Mem> {
         "instr" => func_instr(args),
         "replace" => func_replace(args),
         "trim" => func_trim(args),
+        "zeroblob" => func_zeroblob(args),
         "date" => func_date(args),
         "time" => func_time(args),
         "datetime" => func_datetime(args),
@@ -209,8 +213,33 @@ pub fn func_length(args: &[Mem]) -> FuncResult<Mem> {
     match args.first() {
         Some(Mem::Text(s)) => Ok(Mem::Int(s.chars().count() as i64)),
         Some(Mem::Blob(b)) => Ok(Mem::Int(b.len() as i64)),
+        Some(Mem::ZeroBlob(n)) => Ok(Mem::Int(*n as i64)),
         Some(Mem::Null) | None => Ok(Mem::Null),
         _ => Ok(Mem::Null),
+    }
+}
+
+pub fn func_zeroblob(args: &[Mem]) -> FuncResult<Mem> {
+    if args.len() != 1 {
+        return Err(FuncError::WrongArgCount("zeroblob".into()));
+    }
+    match args.first() {
+        Some(Mem::Int(n)) if *n >= 0 => {
+            println!("zeroblob called with Int({})", n);
+            Ok(Mem::ZeroBlob(*n as i64))
+        }
+        Some(Mem::Real(f)) if *f >= 0.0 => {
+            println!("zeroblob called with Real({})", f);
+            Ok(Mem::ZeroBlob(*f as i64))
+        }
+        Some(Mem::Null) => {
+            println!("zeroblob called with Null");
+            Ok(Mem::Null)
+        }
+        _ => {
+            println!("zeroblob called with unsupported arg");
+            Ok(Mem::Null)
+        }
     }
 }
 
@@ -412,7 +441,7 @@ pub fn func_datetime(args: &[Mem]) -> FuncResult<Mem> {
 }
 
 pub fn func_julianday(args: &[Mem]) -> FuncResult<Mem> {
-    let dt = match parse_datetime(args)? {
+    let dt = match parse_datetime(args) {
         Some(dt) => dt,
         None => return Ok(Mem::Null),
     };
@@ -431,36 +460,34 @@ pub fn func_strftime(args: &[Mem]) -> FuncResult<Mem> {
     func_strftime_impl(&format, &args[1..])
 }
 
-fn parse_datetime(args: &[Mem]) -> FuncResult<Option<chrono::DateTime<chrono::Utc>>> {
+fn parse_datetime(args: &[Mem]) -> Option<chrono::DateTime<chrono::Utc>> {
     if args.is_empty() {
-        return Ok(None);
+        return None;
     }
     let time_val = match &args[0] {
         Mem::Text(t) => t.to_string(),
-        Mem::Int(i) => return Ok(chrono::DateTime::from_timestamp(*i, 0)),
+        Mem::Int(i) => return chrono::DateTime::from_timestamp(*i, 0),
         Mem::Real(f) => {
             let millis = ((*f - 2440587.5) * 86400000.0) as i64;
-            return Ok(chrono::DateTime::from_timestamp_millis(millis));
+            return chrono::DateTime::from_timestamp_millis(millis);
         }
-        Mem::Null => return Ok(None),
-        _ => return Ok(None),
+        Mem::Null => return None,
+        _ => return None,
     };
 
     if time_val.eq_ignore_ascii_case("now") {
-        Ok(Some(chrono::Utc::now()))
+        Some(chrono::Utc::now())
+    } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&time_val, "%Y-%m-%d %H:%M:%S") {
+        Some(dt.and_utc())
+    } else if let Ok(d) = chrono::NaiveDate::parse_from_str(&time_val, "%Y-%m-%d") {
+        Some(d.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc())
     } else {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&time_val, "%Y-%m-%d %H:%M:%S") {
-            Ok(Some(dt.and_utc()))
-        } else if let Ok(d) = chrono::NaiveDate::parse_from_str(&time_val, "%Y-%m-%d") {
-            Ok(Some(d.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc()))
-        } else {
-            Ok(None)
-        }
+        None
     }
 }
 
 fn func_strftime_impl(format: &str, args: &[Mem]) -> FuncResult<Mem> {
-    let dt = match parse_datetime(args)? {
+    let dt = match parse_datetime(args) {
         Some(dt) => dt,
         None => return Ok(Mem::Null),
     };
@@ -719,12 +746,691 @@ mod tests {
         let d = func_date(&[Mem::Text(std::sync::Arc::from("2023-01-01"))]).unwrap();
         assert_eq!(d, Mem::Text(std::sync::Arc::from("2023-01-01")));
 
-        // Test julianday
+        // Test julianday — result must be a Real within expected range.
         let jd = func_julianday(&[Mem::Text(std::sync::Arc::from("2023-01-01"))]).unwrap();
-        if let Mem::Real(f) = jd {
-            assert!((f - 2459945.5).abs() < 0.0001);
-        } else {
-            panic!("Expected Real");
-        }
+        let jd_f = match jd {
+            Mem::Real(f) => f,
+            other => panic!("Expected Real, got {other:?}"),
+        };
+        assert!((jd_f - 2459945.5).abs() < 0.0001);
+    }
+
+    // ── Aggregate dispatch and state machines ──────────────────────────────
+
+    #[test]
+    fn dispatch_aggregate_unknown() {
+        assert!(dispatch_aggregate("bogus").is_err());
+    }
+
+    #[test]
+    fn count_aggregate_star_and_column() {
+        // COUNT(*) style: called with no args, every step counts.
+        let mut star = dispatch_aggregate("count").unwrap();
+        star.step(&[]).unwrap();
+        star.step(&[]).unwrap();
+        assert_eq!(star.finalize().unwrap(), Mem::Int(2));
+
+        // COUNT(col): NULLs are not counted.
+        let mut col = dispatch_aggregate("count").unwrap();
+        col.step(&[Mem::Int(1)]).unwrap();
+        col.step(&[Mem::Null]).unwrap();
+        col.step(&[Mem::Int(3)]).unwrap();
+        assert_eq!(col.finalize().unwrap(), Mem::Int(2));
+    }
+
+    #[test]
+    fn sum_aggregate_all_paths() {
+        // Never stepped -> NULL.
+        let mut empty = dispatch_aggregate("sum").unwrap();
+        assert_eq!(empty.finalize().unwrap(), Mem::Null);
+
+        // All-NULL input -> NULL.
+        let mut all_null = dispatch_aggregate("sum").unwrap();
+        all_null.step(&[Mem::Null]).unwrap();
+        assert_eq!(all_null.finalize().unwrap(), Mem::Null);
+
+        // Integer accumulation without overflow.
+        let mut ints = dispatch_aggregate("sum").unwrap();
+        ints.step(&[Mem::Int(2)]).unwrap();
+        ints.step(&[Mem::Int(3)]).unwrap();
+        assert_eq!(ints.finalize().unwrap(), Mem::Int(5));
+
+        // Integer overflow promotes the accumulator to Real.
+        let mut overflow = dispatch_aggregate("sum").unwrap();
+        overflow.step(&[Mem::Int(i64::MAX)]).unwrap();
+        overflow.step(&[Mem::Int(1)]).unwrap();
+        assert_eq!(
+            overflow.finalize().unwrap(),
+            Mem::Real(i64::MAX as f64 + 1.0)
+        );
+
+        // Int accumulator + Real value promotes to Real.
+        let mut int_then_real = dispatch_aggregate("sum").unwrap();
+        int_then_real.step(&[Mem::Int(2)]).unwrap();
+        int_then_real.step(&[Mem::Real(1.5)]).unwrap();
+        assert_eq!(int_then_real.finalize().unwrap(), Mem::Real(3.5));
+
+        // Int accumulator + non-numeric value falls back to 0.0 via to_real().
+        let mut int_then_text = dispatch_aggregate("sum").unwrap();
+        int_then_text.step(&[Mem::Int(2)]).unwrap();
+        int_then_text
+            .step(&[Mem::Text(std::sync::Arc::from("abc"))])
+            .unwrap();
+        assert_eq!(int_then_text.finalize().unwrap(), Mem::Real(2.0));
+
+        // First value is Real -> accumulator starts as Real.
+        let mut real_start = dispatch_aggregate("sum").unwrap();
+        real_start.step(&[Mem::Real(1.5)]).unwrap();
+        real_start.step(&[Mem::Real(2.5)]).unwrap();
+        assert_eq!(real_start.finalize().unwrap(), Mem::Real(4.0));
+
+        // First value non-numeric -> starts as Real via to_real() fallback.
+        let mut text_start = dispatch_aggregate("sum").unwrap();
+        text_start
+            .step(&[Mem::Text(std::sync::Arc::from("xyz"))])
+            .unwrap();
+        assert_eq!(text_start.finalize().unwrap(), Mem::Real(0.0));
+
+        // Real accumulator + Int value.
+        let mut real_then_int = dispatch_aggregate("sum").unwrap();
+        real_then_int.step(&[Mem::Real(1.0)]).unwrap();
+        real_then_int.step(&[Mem::Int(2)]).unwrap();
+        assert_eq!(real_then_int.finalize().unwrap(), Mem::Real(3.0));
+
+        // Force coverage of the unreachable Some(_) catch-all arm: directly
+        // construct a SumState whose accumulator is a variant that normal
+        // usage can never produce.
+        use liter_vdbe::AggregateState;
+        let mut weird = SumState {
+            sum: Some(Mem::Text(std::sync::Arc::from("oops"))),
+        };
+        // The Some(_) arm does nothing, so the accumulator stays unchanged.
+        weird.step(&[Mem::Int(1)]).unwrap();
+        assert_eq!(
+            weird.finalize().unwrap(),
+            Mem::Text(std::sync::Arc::from("oops"))
+        );
+    }
+
+    #[test]
+    fn min_aggregate_paths() {
+        let mut empty = dispatch_aggregate("min").unwrap();
+        assert_eq!(empty.finalize().unwrap(), Mem::Null);
+
+        let mut m = dispatch_aggregate("min").unwrap();
+        m.step(&[]).unwrap(); // no args at all (defensive no-op path)
+        m.step(&[Mem::Null]).unwrap(); // ignored
+        m.step(&[Mem::Int(5)]).unwrap(); // first real value
+        m.step(&[Mem::Int(2)]).unwrap(); // smaller -> replaces
+        m.step(&[Mem::Int(9)]).unwrap(); // larger -> ignored
+        assert_eq!(m.finalize().unwrap(), Mem::Int(2));
+    }
+
+    #[test]
+    fn max_aggregate_paths() {
+        let mut empty = dispatch_aggregate("max").unwrap();
+        assert_eq!(empty.finalize().unwrap(), Mem::Null);
+
+        let mut m = dispatch_aggregate("max").unwrap();
+        m.step(&[]).unwrap(); // no args at all (defensive no-op path)
+        m.step(&[Mem::Null]).unwrap(); // ignored
+        m.step(&[Mem::Int(5)]).unwrap();
+        m.step(&[Mem::Int(9)]).unwrap(); // larger -> replaces
+        m.step(&[Mem::Int(2)]).unwrap(); // smaller -> ignored
+        assert_eq!(m.finalize().unwrap(), Mem::Int(9));
+    }
+
+    #[test]
+    fn avg_aggregate_paths() {
+        let mut empty = dispatch_aggregate("avg").unwrap();
+        assert_eq!(empty.finalize().unwrap(), Mem::Null);
+
+        let mut a = dispatch_aggregate("avg").unwrap();
+        a.step(&[]).unwrap(); // no args at all (defensive no-op path)
+        a.step(&[Mem::Int(2)]).unwrap();
+        a.step(&[Mem::Int(4)]).unwrap();
+        // Non-numeric input (to_real() == None) is ignored, not counted.
+        a.step(&[Mem::Text(std::sync::Arc::from("nan"))]).unwrap();
+        assert_eq!(a.finalize().unwrap(), Mem::Real(3.0));
+    }
+
+    // ── Scalar dispatch ─────────────────────────────────────────────────────
+
+    #[test]
+    fn dispatch_function_routes_known_names() {
+        let one = [Mem::Int(1)];
+        let txt = |s: &str| Mem::Text(std::sync::Arc::from(s));
+
+        assert!(dispatch_function("abs", &one).is_ok());
+        assert!(dispatch_function("length", &[txt("hi")]).is_ok());
+        assert!(dispatch_function("typeof", &one).is_ok());
+        assert!(dispatch_function("upper", &[txt("a")]).is_ok());
+        assert!(dispatch_function("lower", &[txt("A")]).is_ok());
+        assert!(dispatch_function("coalesce", &[Mem::Null, Mem::Int(1)]).is_ok());
+        assert!(dispatch_function("ifnull", &[Mem::Null, Mem::Int(1)]).is_ok());
+        assert!(dispatch_function("max", &one).is_ok());
+        assert!(dispatch_function("min", &one).is_ok());
+        assert!(dispatch_function("round", &[Mem::Real(1.2)]).is_ok());
+        assert!(dispatch_function("sign", &one).is_ok());
+        assert!(dispatch_function("substr", &[txt("hi"), Mem::Int(1)]).is_ok());
+        assert!(dispatch_function("substring", &[txt("hi"), Mem::Int(1)]).is_ok());
+        assert!(dispatch_function("instr", &[txt("hi"), txt("h")]).is_ok());
+        assert!(dispatch_function("replace", &[txt("hi"), txt("h"), txt("y")]).is_ok());
+        assert!(dispatch_function("trim", &[txt(" hi ")]).is_ok());
+        assert!(dispatch_function("date", &[txt("2023-01-01")]).is_ok());
+        assert!(dispatch_function("time", &[txt("2023-01-01")]).is_ok());
+        assert!(dispatch_function("datetime", &[txt("2023-01-01")]).is_ok());
+        assert!(dispatch_function("julianday", &[txt("2023-01-01")]).is_ok());
+        assert!(dispatch_function("strftime", &[txt("%Y"), txt("2023-01-01")]).is_ok());
+
+        assert!(matches!(
+            dispatch_function("nope", &[]),
+            Err(FuncError::NotImplemented(name)) if name == "nope"
+        ));
+    }
+
+    // ── length / typeof / upper / lower ────────────────────────────────────
+
+    #[test]
+    fn length_blob_null_and_unsupported() {
+        assert_eq!(
+            func_length(&[Mem::Blob(std::sync::Arc::from(vec![1u8, 2, 3]))]).unwrap(),
+            Mem::Int(3)
+        );
+        assert_eq!(func_length(&[Mem::Null]).unwrap(), Mem::Null);
+        assert_eq!(func_length(&[]).unwrap(), Mem::Null);
+        assert_eq!(func_length(&[Mem::Agg(0)]).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn typeof_all_variants() {
+        assert_eq!(
+            func_typeof(&[Mem::Real(1.5)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("real"))
+        );
+        assert_eq!(
+            func_typeof(&[Mem::Text(std::sync::Arc::from("x"))]).unwrap(),
+            Mem::Text(std::sync::Arc::from("text"))
+        );
+        assert_eq!(
+            func_typeof(&[Mem::Blob(std::sync::Arc::from(vec![1u8]))]).unwrap(),
+            Mem::Text(std::sync::Arc::from("blob"))
+        );
+        assert_eq!(
+            func_typeof(&[Mem::ZeroBlob(4)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("blob"))
+        );
+        assert_eq!(
+            func_typeof(&[]).unwrap(),
+            Mem::Text(std::sync::Arc::from("null"))
+        );
+        // Aggregate handles are surfaced to SQL as blobs.
+        assert_eq!(
+            func_typeof(&[Mem::Agg(0)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("blob"))
+        );
+    }
+
+    #[test]
+    fn upper_lower_null_and_non_text() {
+        assert_eq!(func_upper(&[Mem::Null]).unwrap(), Mem::Null);
+        assert_eq!(func_upper(&[]).unwrap(), Mem::Null);
+        assert_eq!(func_upper(&[Mem::Int(5)]).unwrap(), Mem::Null);
+        assert_eq!(func_lower(&[Mem::Null]).unwrap(), Mem::Null);
+        assert_eq!(func_lower(&[]).unwrap(), Mem::Null);
+        assert_eq!(func_lower(&[Mem::Int(5)]).unwrap(), Mem::Null);
+        assert_eq!(
+            func_upper(&[Mem::Text(std::sync::Arc::from("hello"))]).unwrap(),
+            Mem::Text(std::sync::Arc::from("HELLO"))
+        );
+        assert_eq!(
+            func_lower(&[Mem::Text(std::sync::Arc::from("HELLO"))]).unwrap(),
+            Mem::Text(std::sync::Arc::from("hello"))
+        );
+    }
+
+    #[test]
+    fn abs_real_and_unsupported() {
+        assert_eq!(func_abs(&[Mem::Real(-3.5)]).unwrap(), Mem::Real(3.5));
+        assert_eq!(
+            func_abs(&[Mem::Text(std::sync::Arc::from("x"))]).unwrap(),
+            Mem::Null
+        );
+        assert_eq!(func_abs(&[]).unwrap(), Mem::Null);
+        // i64::MIN has no positive counterpart; checked_abs saturates to MAX.
+        assert_eq!(func_abs(&[Mem::Int(i64::MIN)]).unwrap(), Mem::Int(i64::MAX));
+    }
+
+    // ── coalesce / ifnull ───────────────────────────────────────────────────
+
+    #[test]
+    fn coalesce_all_null() {
+        assert_eq!(func_coalesce(&[Mem::Null, Mem::Null]).unwrap(), Mem::Null);
+        assert_eq!(func_coalesce(&[]).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn ifnull_wrong_arg_count_and_ok() {
+        assert!(func_ifnull(&[Mem::Null]).is_err());
+        assert!(func_ifnull(&[Mem::Null, Mem::Int(1), Mem::Int(2)]).is_err());
+        assert_eq!(func_ifnull(&[Mem::Null, Mem::Int(7)]).unwrap(), Mem::Int(7));
+        assert_eq!(func_ifnull(&[Mem::Int(3), Mem::Int(7)]).unwrap(), Mem::Int(3));
+    }
+
+    // ── substr ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn substr_wrong_arg_count() {
+        assert!(func_substr(&[Mem::Text(std::sync::Arc::from("x"))]).is_err());
+        assert!(func_substr(&[
+            Mem::Text(std::sync::Arc::from("x")),
+            Mem::Int(1),
+            Mem::Int(1),
+            Mem::Int(1)
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn substr_null_and_non_text_first_arg() {
+        assert_eq!(func_substr(&[Mem::Null, Mem::Int(1)]).unwrap(), Mem::Null);
+        assert_eq!(
+            func_substr(&[Mem::Int(12345), Mem::Int(2), Mem::Int(2)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("23"))
+        );
+    }
+
+    #[test]
+    fn substr_start_variants() {
+        let text = Mem::Text(std::sync::Arc::from("abcdef"));
+        // start == 0 behaves like start == 1.
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Int(0), Mem::Int(3)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("abc"))
+        );
+        // start from a Real.
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Real(2.0), Mem::Int(2)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("bc"))
+        );
+        // start from a parseable Text.
+        assert_eq!(
+            func_substr(&[
+                text.clone(),
+                Mem::Text(std::sync::Arc::from("3")),
+                Mem::Int(2)
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from("cd"))
+        );
+        // start from an unparseable Text defaults to 0.
+        assert_eq!(
+            func_substr(&[
+                text.clone(),
+                Mem::Text(std::sync::Arc::from("nope")),
+                Mem::Int(2)
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from("ab"))
+        );
+        // start of an unsupported type yields NULL.
+        assert_eq!(func_substr(&[text.clone(), Mem::Null]).unwrap(), Mem::Null);
+        // negative start far beyond the string length clamps to the beginning.
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Int(-100), Mem::Int(2)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("ab"))
+        );
+    }
+
+    #[test]
+    fn substr_length_variants() {
+        let text = Mem::Text(std::sync::Arc::from("abcdef"));
+        // length from a Real.
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Int(1), Mem::Real(3.0)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("abc"))
+        );
+        // length from a parseable Text.
+        assert_eq!(
+            func_substr(&[
+                text.clone(),
+                Mem::Int(1),
+                Mem::Text(std::sync::Arc::from("2"))
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from("ab"))
+        );
+        // length from an unparseable Text defaults to 0.
+        assert_eq!(
+            func_substr(&[
+                text.clone(),
+                Mem::Int(1),
+                Mem::Text(std::sync::Arc::from("bogus"))
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from(""))
+        );
+        // length of an unsupported type is treated as "no length limit".
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Int(4), Mem::Null]).unwrap(),
+            Mem::Text(std::sync::Arc::from("def"))
+        );
+        // length larger than the remaining string clamps to the end.
+        assert_eq!(
+            func_substr(&[text.clone(), Mem::Int(4), Mem::Int(100)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("def"))
+        );
+    }
+
+    // ── instr / replace / trim ──────────────────────────────────────────────
+
+    #[test]
+    fn instr_wrong_arg_count_nulls_and_coercion() {
+        assert!(func_instr(&[Mem::Text(std::sync::Arc::from("x"))]).is_err());
+        assert_eq!(
+            func_instr(&[Mem::Null, Mem::Text(std::sync::Arc::from("x"))]).unwrap(),
+            Mem::Null
+        );
+        assert_eq!(
+            func_instr(&[Mem::Text(std::sync::Arc::from("x")), Mem::Null]).unwrap(),
+            Mem::Null
+        );
+        // Non-text arguments are coerced through mem_to_string.
+        assert_eq!(
+            func_instr(&[Mem::Int(12345), Mem::Int(23)]).unwrap(),
+            Mem::Int(2)
+        );
+        // Real arguments are also coerced through mem_to_string.
+        assert_eq!(
+            func_instr(&[Mem::Real(3.14), Mem::Text(std::sync::Arc::from("14"))]).unwrap(),
+            Mem::Int(3)
+        );
+    }
+
+    #[test]
+    fn replace_wrong_arg_count_nulls_and_coercion() {
+        assert!(func_replace(&[Mem::Text(std::sync::Arc::from("x"))]).is_err());
+        assert_eq!(
+            func_replace(&[
+                Mem::Null,
+                Mem::Text(std::sync::Arc::from("a")),
+                Mem::Text(std::sync::Arc::from("b"))
+            ])
+            .unwrap(),
+            Mem::Null
+        );
+        assert_eq!(
+            func_replace(&[
+                Mem::Text(std::sync::Arc::from("abc")),
+                Mem::Null,
+                Mem::Text(std::sync::Arc::from("b"))
+            ])
+            .unwrap(),
+            Mem::Null
+        );
+        assert_eq!(
+            func_replace(&[
+                Mem::Text(std::sync::Arc::from("abc")),
+                Mem::Text(std::sync::Arc::from("a")),
+                Mem::Null
+            ])
+            .unwrap(),
+            Mem::Null
+        );
+        // Non-text arguments are coerced through mem_to_string.
+        assert_eq!(
+            func_replace(&[
+                Mem::Int(1231),
+                Mem::Int(23),
+                Mem::Text(std::sync::Arc::from("X"))
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from("1X1"))
+        );
+        // Non-text replacement argument is also coerced through mem_to_string.
+        assert_eq!(
+            func_replace(&[
+                Mem::Text(std::sync::Arc::from("ab")),
+                Mem::Text(std::sync::Arc::from("a")),
+                Mem::Int(5)
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from("5b"))
+        );
+    }
+
+    #[test]
+    fn trim_wrong_arg_count_null_and_coercion() {
+        assert!(func_trim(&[]).is_err());
+        assert!(func_trim(&[
+            Mem::Text(std::sync::Arc::from("x")),
+            Mem::Text(std::sync::Arc::from("y")),
+            Mem::Text(std::sync::Arc::from("z"))
+        ])
+        .is_err());
+        assert_eq!(func_trim(&[Mem::Null]).unwrap(), Mem::Null);
+        // Non-text first argument is coerced through mem_to_string.
+        assert_eq!(
+            func_trim(&[Mem::Int(42)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("42"))
+        );
+        // Non-text second argument falls back to trimming spaces.
+        assert_eq!(
+            func_trim(&[Mem::Text(std::sync::Arc::from("  hi  ")), Mem::Int(1)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("hi"))
+        );
+        // A Real first argument is coerced through mem_to_string's Real arm.
+        assert_eq!(
+            func_trim(&[Mem::Real(3.5)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("3.5"))
+        );
+        // A Blob first argument has no textual representation, so it
+        // coerces to the empty string via mem_to_string's fallback arm.
+        assert_eq!(
+            func_trim(&[Mem::Blob(std::sync::Arc::from(vec![1u8, 2]))]).unwrap(),
+            Mem::Text(std::sync::Arc::from(""))
+        );
+    }
+
+    // ── date / time / datetime / julianday / strftime ───────────────────────
+
+    #[test]
+    fn date_time_functions() {
+        assert_eq!(
+            func_time(&[Mem::Text(std::sync::Arc::from("2023-01-01 13:45:30"))]).unwrap(),
+            Mem::Text(std::sync::Arc::from("13:45:30"))
+        );
+        assert_eq!(
+            func_date(&[Mem::Text(std::sync::Arc::from("2023-01-01 13:45:30"))]).unwrap(),
+            Mem::Text(std::sync::Arc::from("2023-01-01"))
+        );
+        assert_eq!(
+            func_datetime(&[Mem::Text(std::sync::Arc::from("2023-06-15 10:30:00"))]).unwrap(),
+            Mem::Text(std::sync::Arc::from("2023-06-15 10:30:00"))
+        );
+    }
+
+    #[test]
+    fn date_functions_invalid_and_missing_input() {
+        // No arguments -> NULL.
+        assert_eq!(func_date(&[]).unwrap(), Mem::Null);
+        assert_eq!(func_julianday(&[]).unwrap(), Mem::Null);
+        // Unparseable text -> NULL.
+        assert_eq!(
+            func_date(&[Mem::Text(std::sync::Arc::from("not-a-date"))]).unwrap(),
+            Mem::Null
+        );
+        // Unsupported argument type -> NULL.
+        assert_eq!(
+            func_date(&[Mem::Blob(std::sync::Arc::from(vec![1u8]))]).unwrap(),
+            Mem::Null
+        );
+        assert_eq!(func_date(&[Mem::Null]).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn date_functions_now_and_julian_real_roundtrip() {
+        // "now" (case-insensitively) resolves to the current time rather than NULL.
+        let now_date = func_date(&[Mem::Text(std::sync::Arc::from("NOW"))]).unwrap();
+        let now_text = match now_date {
+            Mem::Text(t) => t,
+            other => panic!("expected text, got {other:?}"),
+        };
+        assert_eq!(now_text.len(), 10);
+
+        // A Julian day (Real) round-trips back to the same calendar date/time.
+        assert_eq!(
+            func_datetime(&[Mem::Real(2459945.5)]).unwrap(),
+            Mem::Text(std::sync::Arc::from("2023-01-01 00:00:00"))
+        );
+    }
+
+    #[test]
+    fn strftime_function() {
+        assert!(func_strftime(&[]).is_err());
+        // Non-text format -> NULL.
+        assert_eq!(func_strftime(&[Mem::Int(1)]).unwrap(), Mem::Null);
+        assert_eq!(
+            func_strftime(&[
+                Mem::Text(std::sync::Arc::from("%Y/%m/%d")),
+                Mem::Text(std::sync::Arc::from("2023-01-01"))
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from("2023/01/01"))
+        );
+    }
+
+    // ── max()/min() scalar and compare_mem ──────────────────────────────────
+
+    #[test]
+    fn max_min_scalar_empty_and_null_equal() {
+        assert_eq!(func_max_scalar(&[]).unwrap(), Mem::Null);
+        assert_eq!(func_min_scalar(&[]).unwrap(), Mem::Null);
+        // Two NULLs compare equal; neither replaces the other.
+        assert_eq!(func_max_scalar(&[Mem::Null, Mem::Null]).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn max_min_scalar_mixed_types() {
+        // Int vs Real, both orderings.
+        assert_eq!(
+            func_max_scalar(&[Mem::Int(5), Mem::Real(1.0)]).unwrap(),
+            Mem::Int(5)
+        );
+        assert_eq!(
+            func_max_scalar(&[Mem::Real(1.0), Mem::Int(5)]).unwrap(),
+            Mem::Int(5)
+        );
+
+        // Text vs Text.
+        assert_eq!(
+            func_max_scalar(&[
+                Mem::Text(std::sync::Arc::from("a")),
+                Mem::Text(std::sync::Arc::from("b"))
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from("b"))
+        );
+
+        // Numeric vs Text: text sorts higher than numbers in both directions.
+        assert_eq!(
+            func_max_scalar(&[Mem::Int(5), Mem::Text(std::sync::Arc::from("abc"))]).unwrap(),
+            Mem::Text(std::sync::Arc::from("abc"))
+        );
+        assert_eq!(
+            func_min_scalar(&[Mem::Text(std::sync::Arc::from("abc")), Mem::Int(5)]).unwrap(),
+            Mem::Int(5)
+        );
+
+        // Unhandled type combination (e.g. two blobs) falls back to "equal",
+        // so the first value seen is kept.
+        let blobs = [
+            Mem::Blob(std::sync::Arc::from(vec![1u8])),
+            Mem::Blob(std::sync::Arc::from(vec![2u8])),
+        ];
+        assert_eq!(func_max_scalar(&blobs).unwrap(), blobs[0].clone());
+
+        // Real vs Real.
+        assert_eq!(
+            func_max_scalar(&[Mem::Real(1.5), Mem::Real(2.5)]).unwrap(),
+            Mem::Real(2.5)
+        );
+        assert_eq!(
+            func_min_scalar(&[Mem::Real(1.5), Mem::Real(2.5)]).unwrap(),
+            Mem::Real(1.5)
+        );
+    }
+
+    // ── round() ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn round_edge_cases() {
+        assert_eq!(func_round(&[]).unwrap(), Mem::Null);
+        assert_eq!(func_round(&[Mem::Null]).unwrap(), Mem::Null);
+        assert_eq!(
+            func_round(&[Mem::Text(std::sync::Arc::from("2.5"))]).unwrap(),
+            Mem::Real(3.0)
+        );
+        assert_eq!(
+            func_round(&[Mem::Text(std::sync::Arc::from("bogus"))]).unwrap(),
+            Mem::Real(0.0)
+        );
+        // Unsupported value type defaults to 0.0.
+        assert_eq!(
+            func_round(&[Mem::Blob(std::sync::Arc::from(vec![1u8]))]).unwrap(),
+            Mem::Real(0.0)
+        );
+        // Digits from a Real argument.
+        assert_eq!(
+            func_round(&[Mem::Real(1.2345), Mem::Real(2.0)]).unwrap(),
+            Mem::Real(1.23)
+        );
+        // Unsupported digits type defaults to 0 digits.
+        assert_eq!(
+            func_round(&[Mem::Real(1.6), Mem::Null]).unwrap(),
+            Mem::Real(2.0)
+        );
+        // Integer value is coerced to f64 then rounded.
+        assert_eq!(func_round(&[Mem::Int(5)]).unwrap(), Mem::Real(5.0));
+    }
+
+    // ── sign() ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn sign_extra_cases() {
+        assert_eq!(func_sign(&[Mem::Real(-3.5)]).unwrap(), Mem::Int(-1));
+        assert_eq!(func_sign(&[Mem::Real(0.0)]).unwrap(), Mem::Int(0));
+        assert_eq!(func_sign(&[Mem::Null]).unwrap(), Mem::Null);
+        assert_eq!(func_sign(&[]).unwrap(), Mem::Null);
+        // Unsupported type defaults to 0.
+        assert_eq!(
+            func_sign(&[Mem::Text(std::sync::Arc::from("x"))]).unwrap(),
+            Mem::Int(0)
+        );
+    }
+
+    #[test]
+    fn test_zeroblob() {
+        assert_eq!(
+            dispatch_function("zeroblob", &[Mem::Int(5)]).unwrap(),
+            Mem::ZeroBlob(5)
+        );
+        assert_eq!(
+            dispatch_function("zeroblob", &[Mem::Real(3.0)]).unwrap(),
+            Mem::ZeroBlob(3)
+        );
+        assert_eq!(
+            dispatch_function("zeroblob", &[Mem::Null]).unwrap(),
+            Mem::Null
+        );
+        assert_eq!(
+            dispatch_function("zeroblob", &[Mem::Int(-1)]).unwrap(),
+            Mem::Null
+        );
+        assert!(dispatch_function("zeroblob", &[]).is_err());
+        assert_eq!(
+            func_length(&[Mem::ZeroBlob(10)]).unwrap(),
+            Mem::Int(10)
+        );
     }
 }

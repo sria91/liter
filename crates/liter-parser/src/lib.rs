@@ -235,18 +235,19 @@ impl<'a> Parser<'a> {
                     direction = SortDirection::Desc;
                 }
 
-                let mut nulls = NullsOrder::Default;
-                if self.consume_if(Token::Nulls)? {
+                let nulls = if self.consume_if(Token::Nulls)? {
                     if self.consume_if(Token::First)? {
-                        nulls = NullsOrder::First;
+                        NullsOrder::First
                     } else if self.consume_if(Token::Last)? {
-                        nulls = NullsOrder::Last;
+                        NullsOrder::Last
                     } else {
                         return Err(ParseError::SyntaxError(
                             "expected FIRST or LAST after NULLS".to_string(),
                         ));
                     }
-                }
+                } else {
+                    NullsOrder::Default
+                };
 
                 order_by.push(OrderingTerm {
                     expr,
@@ -568,12 +569,11 @@ impl<'a> Parser<'a> {
             Some(Token::Ident(id)) => {
                 self.consume()?;
                 if self.consume_if(Token::LParen)? {
-                    let args;
-                    if self.consume_if(Token::RParen)? {
-                        args = FunctionArgs::None;
+                    let args = if self.consume_if(Token::RParen)? {
+                        FunctionArgs::None
                     } else if self.consume_if(Token::Star)? {
                         self.expect(Token::RParen)?;
-                        args = FunctionArgs::Star;
+                        FunctionArgs::Star
                     } else {
                         let mut exprs = vec![];
                         loop {
@@ -583,8 +583,8 @@ impl<'a> Parser<'a> {
                             }
                         }
                         self.expect(Token::RParen)?;
-                        args = FunctionArgs::List(exprs);
-                    }
+                        FunctionArgs::List(exprs)
+                    };
                     Ok(Expr::Function {
                         schema: None,
                         name: id.to_string(),
@@ -629,7 +629,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn token_to_binary_op(&self, tok: &Token) -> Option<BinaryOp> {
+    pub fn token_to_binary_op(&self, tok: &Token) -> Option<BinaryOp> {
         match tok {
             Token::Eq | Token::EqEq => Some(BinaryOp::Eq),
             Token::Ne | Token::BangEq => Some(BinaryOp::Ne),
@@ -648,7 +648,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn peek(&mut self) -> ParseResult<Option<&Token<'a>>> {
+    pub fn peek(&mut self) -> ParseResult<Option<&Token<'a>>> {
         match self.iter.peek() {
             Some(Ok((tok, _))) => Ok(Some(tok)),
             Some(Err(e)) => Err(ParseError::TokenError(e.clone())),
@@ -656,7 +656,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn consume(&mut self) -> ParseResult<Option<Token<'a>>> {
+    pub fn consume(&mut self) -> ParseResult<Option<Token<'a>>> {
         match self.iter.next() {
             Some(Ok((tok, _))) => Ok(Some(tok)),
             Some(Err(e)) => Err(ParseError::TokenError(e)),
@@ -664,7 +664,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect(&mut self, expected: Token<'a>) -> ParseResult<()> {
+    pub fn expect(&mut self, expected: Token<'a>) -> ParseResult<()> {
         match self.consume()? {
             Some(tok) if tok == expected => Ok(()),
             Some(tok) => Err(ParseError::SyntaxError(format!("{:?}", tok))),
@@ -672,7 +672,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_ident(&mut self) -> ParseResult<String> {
+    pub fn expect_ident(&mut self) -> ParseResult<String> {
         match self.consume()? {
             Some(Token::Ident(id)) => {
                 if id.starts_with('"') || id.starts_with('`') || id.starts_with('[') {

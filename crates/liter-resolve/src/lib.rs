@@ -64,7 +64,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn resolve_select(&self, select: &mut SelectStmt) -> ResolveResult<()> {
+    pub fn resolve_select(&self, select: &mut SelectStmt) -> ResolveResult<()> {
         let body = match &mut select.body {
             SelectBody::Simple(simple) => simple,
             _ => return Err(ResolveError::NotImplemented),
@@ -143,7 +143,7 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
-    fn resolve_expr(
+    pub fn resolve_expr(
         &self,
         expr: &mut Expr,
         available_tables: &[(String, liter_schema::SchemaObject)],
@@ -188,3 +188,4 @@ impl<'a> Resolver<'a> {
         }
     }
 }
+

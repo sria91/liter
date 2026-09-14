@@ -123,6 +123,112 @@ pub trait Vfs: Send + Sync {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockFile;
+
+    impl VfsFile for MockFile {
+        fn read(&mut self, _buf: &mut [u8], _offset: u64) -> io::Result<usize> {
+            Ok(0)
+        }
+        fn write(&mut self, _buf: &[u8], _offset: u64) -> io::Result<()> {
+            Ok(())
+        }
+        fn truncate(&mut self, _size: u64) -> io::Result<()> {
+            Ok(())
+        }
+        fn sync(&mut self, _flags: SyncFlags) -> io::Result<()> {
+            Ok(())
+        }
+        fn file_size(&self) -> io::Result<u64> {
+            Ok(0)
+        }
+        fn lock(&mut self, _level: LockLevel) -> io::Result<()> {
+            Ok(())
+        }
+        fn unlock(&mut self, _level: LockLevel) -> io::Result<()> {
+            Ok(())
+        }
+        fn check_reserved_lock(&self) -> io::Result<bool> {
+            Ok(false)
+        }
+        fn device_characteristics(&self) -> DeviceCharacteristics {
+            DeviceCharacteristics::empty()
+        }
+    }
+
+    struct MockVfs;
+
+    impl Vfs for MockVfs {
+        type File = MockFile;
+
+        fn open(&self, _path: &Path, _flags: OpenFlags) -> io::Result<Self::File> {
+            Ok(MockFile)
+        }
+        fn delete(&self, _path: &Path, _sync_dir: bool) -> io::Result<()> {
+            Ok(())
+        }
+        fn access(&self, _path: &Path, _flags: AccessFlags) -> io::Result<bool> {
+            Ok(false)
+        }
+        fn full_pathname(&self, path: &Path) -> io::Result<PathBuf> {
+            Ok(path.to_path_buf())
+        }
+        fn randomness(&self, _buf: &mut [u8]) {}
+        fn sleep(&self, _micros: u64) {}
+        fn current_time(&self) -> f64 {
+            0.0
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+    }
+
+    #[test]
+    fn default_sector_size_is_512() {
+        let file = MockFile;
+        assert_eq!(file.sector_size(), 512);
+    }
+
+    #[test]
+    fn default_max_pathname_is_512() {
+        let vfs = MockVfs;
+        assert_eq!(vfs.max_pathname(), 512);
+    }
+
+    #[test]
+    fn mock_vfs_exercises_all_trait_methods() {
+        let vfs = MockVfs;
+        assert_eq!(vfs.name(), "mock");
+        assert_eq!(vfs.current_time(), 0.0);
+        vfs.sleep(0);
+        let mut rand_buf = [0u8; 4];
+        vfs.randomness(&mut rand_buf);
+
+        let path = Path::new("/tmp/mock-db");
+        assert!(!vfs.access(path, AccessFlags::EXISTS).unwrap());
+        assert_eq!(vfs.full_pathname(path).unwrap(), path.to_path_buf());
+        vfs.delete(path, false).unwrap();
+
+        let mut file = vfs.open(path, OpenFlags::READ_ONLY).unwrap();
+        let mut buf = [0u8; 8];
+        assert_eq!(file.read(&mut buf, 0).unwrap(), 0);
+        file.write(&buf, 0).unwrap();
+        file.truncate(0).unwrap();
+        file.sync(SyncFlags::NORMAL).unwrap();
+        assert_eq!(file.file_size().unwrap(), 0);
+        file.lock(LockLevel::Shared).unwrap();
+        file.unlock(LockLevel::None).unwrap();
+        assert!(!file.check_reserved_lock().unwrap());
+        assert_eq!(
+            file.device_characteristics(),
+            DeviceCharacteristics::empty()
+        );
+    }
+}
+
 /// Error type for VFS operations.
 #[derive(Debug, thiserror::Error)]
 pub enum VfsError {
