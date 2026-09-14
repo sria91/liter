@@ -5,9 +5,9 @@
 //! interactive).  When stdin is not a TTY the banner and continuation prompts
 //! are suppressed so the shell can be driven like the C `sqlite3` binary.
 
-use std::io::{self, BufRead, Write};
 #[cfg(not(test))]
 use std::io::IsTerminal;
+use std::io::{self, BufRead, Write};
 
 #[cfg(not(test))]
 fn main() {
@@ -180,7 +180,9 @@ mod tests {
         assert!(is_returning_sql("SELECT 1;"));
         assert!(is_returning_sql("select * from t;"));
         assert!(is_returning_sql("EXPLAIN SELECT 1;"));
-        assert!(is_returning_sql("with cte as (select 1) select * from cte;"));
+        assert!(is_returning_sql(
+            "with cte as (select 1) select * from cte;"
+        ));
         assert!(is_returning_sql("VALUES (1, 2);"));
         assert!(is_returning_sql("pragma table_info('t');"));
 
@@ -204,10 +206,7 @@ mod tests {
             format_value(&liter::Value::Blob(vec![1, 2, 3])),
             "[1, 2, 3]"
         );
-        assert_eq!(
-            format_value(&liter::Value::ZeroBlob(10)),
-            "(zeroblob 10)"
-        );
+        assert_eq!(format_value(&liter::Value::ZeroBlob(10)), "(zeroblob 10)");
     }
 
     #[test]
@@ -276,7 +275,12 @@ mod tests {
         exec_sql("SELECT * FROM non_existent_table;", &conn, &mut out, true);
 
         // Execute error
-        exec_sql("INSERT INTO non_existent_table VALUES (1);", &conn, &mut out, true);
+        exec_sql(
+            "INSERT INTO non_existent_table VALUES (1);",
+            &conn,
+            &mut out,
+            true,
+        );
     }
 
     #[test]
@@ -293,7 +297,13 @@ mod tests {
         let mut out_non_interactive = Vec::new();
         let args_default = vec!["liter-shell".to_string()];
         let input_empty = b"";
-        assert!(run_cli(&args_default, &input_empty[..], &mut out_non_interactive, false).is_ok());
+        assert!(run_cli(
+            &args_default,
+            &input_empty[..],
+            &mut out_non_interactive,
+            false
+        )
+        .is_ok());
     }
 
     #[test]

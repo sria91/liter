@@ -1634,7 +1634,10 @@ mod tests {
         assert_eq!(cur.max_rowid().unwrap(), 20);
 
         // Cursor seek and rowid
-        assert_eq!(cur.move_to(&10u64.to_be_bytes(), SeekBias::Ge).unwrap(), SeekResult::Equal);
+        assert_eq!(
+            cur.move_to(&10u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Equal
+        );
         assert!(cur.is_valid());
         assert_eq!(cur.rowid().unwrap(), 10);
         assert_eq!(cur.data().unwrap(), b"ten");
@@ -1667,7 +1670,10 @@ mod tests {
         }
 
         // Seek miss > max
-        assert_eq!(cur.move_to(&999u64.to_be_bytes(), SeekBias::Ge).unwrap(), SeekResult::Less);
+        assert_eq!(
+            cur.move_to(&999u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Less
+        );
 
         // Reverse traversal
         cur.move_to_last().unwrap();
@@ -1744,15 +1750,24 @@ mod tests {
         }
 
         // Seek Ge exact
-        assert_eq!(cur.move_to(&20u64.to_be_bytes(), SeekBias::Ge).unwrap(), SeekResult::Equal);
+        assert_eq!(
+            cur.move_to(&20u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Equal
+        );
         assert_eq!(cur.rowid().unwrap(), 20);
 
         // Seek Ge between 20 and 30 -> finds 30 (Greater)
-        assert_eq!(cur.move_to(&25u64.to_be_bytes(), SeekBias::Ge).unwrap(), SeekResult::Greater);
+        assert_eq!(
+            cur.move_to(&25u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Greater
+        );
         assert_eq!(cur.rowid().unwrap(), 30);
 
         // Seek Ge beyond largest element (50 > 40)
-        assert_eq!(cur.move_to(&50u64.to_be_bytes(), SeekBias::Ge).unwrap(), SeekResult::Less);
+        assert_eq!(
+            cur.move_to(&50u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Less
+        );
         assert!(!cur.is_valid());
     }
 
@@ -1827,7 +1842,12 @@ mod tests {
         // Search on completely empty table
         let p_empty_leaf = bt.allocate_page(PageKind::TableLeaf).unwrap();
         let mut cur_empty = bt.cursor(p_empty_leaf, true).unwrap();
-        assert_eq!(cur_empty.move_to(&1u64.to_be_bytes(), SeekBias::Ge).unwrap(), SeekResult::Empty);
+        assert_eq!(
+            cur_empty
+                .move_to(&1u64.to_be_bytes(), SeekBias::Ge)
+                .unwrap(),
+            SeekResult::Empty
+        );
 
         // Load cell on non-leaf / unexpected kind
         let mut cur_corrupt = bt.cursor(1, true).unwrap();
@@ -1838,7 +1858,9 @@ mod tests {
             rightmost_child: 0,
             header_offset: 0,
         };
-        assert!(cur_corrupt.load_cell(&vec![0u8; 4096], &bad_hdr, 0).is_err());
+        assert!(cur_corrupt
+            .load_cell(&vec![0u8; 4096], &bad_hdr, 0)
+            .is_err());
 
         // Test insert_cell_raw with full page
         let mut small_page = vec![0u8; 50];
@@ -1853,7 +1875,10 @@ mod tests {
         {
             let mut cur = bt.cursor(p_int_empty, true).unwrap();
             cur.state = CursorState::Valid;
-            cur.stack.push(CursorFrame { pgno: p_int_empty, cell_idx: 10 });
+            cur.stack.push(CursorFrame {
+                pgno: p_int_empty,
+                cell_idx: 10,
+            });
             assert!(cur.delete().is_err());
         }
 
@@ -1888,7 +1913,7 @@ mod tests {
 
             // 2. TableLeaf inline_end > cell.len()
             bad_page[8..10].copy_from_slice(&50u16.to_be_bytes()); // ptr = 50
-            // cell at 50: payload_len = 1000 (0x87, 0x68), rowid = 1
+                                                                   // cell at 50: payload_len = 1000 (0x87, 0x68), rowid = 1
             bad_page[50] = 0x87;
             bad_page[51] = 0x68;
             bad_page[52] = 1;

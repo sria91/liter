@@ -188,4 +188,3 @@ impl<'a> Resolver<'a> {
         }
     }
 }
-

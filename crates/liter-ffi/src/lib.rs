@@ -479,8 +479,7 @@ mod tests {
     fn open_invalid_path_returns_cantopen() {
         unsafe {
             let path =
-                CString::new("/no/such/directory/liter-ffi-test-db-does-not-exist.sqlite")
-                    .unwrap();
+                CString::new("/no/such/directory/liter-ffi-test-db-does-not-exist.sqlite").unwrap();
             let mut db: *mut sqlite3 = ptr::null_mut();
             let rc = sqlite3_open(path.as_ptr(), &mut db);
             assert_eq!(rc, SQLITE_CANTOPEN);
@@ -562,8 +561,13 @@ mod tests {
         unsafe {
             let sql = CString::new("SELECT 1").unwrap();
             let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
-            let rc =
-                sqlite3_prepare_v2(ptr::null_mut(), sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
+            let rc = sqlite3_prepare_v2(
+                ptr::null_mut(),
+                sql.as_ptr(),
+                -1,
+                &mut stmt,
+                ptr::null_mut(),
+            );
             assert_eq!(rc, SQLITE_MISUSE);
         }
     }
@@ -991,13 +995,7 @@ mod tests {
 
             let blob = [1u8, 2, 3];
             assert_eq!(
-                sqlite3_bind_blob(
-                    ptr::null_mut(),
-                    1,
-                    blob.as_ptr() as *const c_void,
-                    3,
-                    None
-                ),
+                sqlite3_bind_blob(ptr::null_mut(), 1, blob.as_ptr() as *const c_void, 3, None),
                 SQLITE_ERROR
             );
         }

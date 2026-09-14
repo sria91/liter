@@ -233,10 +233,7 @@ fn test_resolve_qualified_columns() {
     let resolver = Resolver::new(&schema);
     let obj = schema.get("users").unwrap();
     let posts = schema.get("posts").unwrap();
-    let tables = vec![
-        ("users".to_string(), obj),
-        ("posts".to_string(), posts),
-    ];
+    let tables = vec![("users".to_string(), obj), ("posts".to_string(), posts)];
 
     // Qualified match
     let mut expr = Expr::Column {

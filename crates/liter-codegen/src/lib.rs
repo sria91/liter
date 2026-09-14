@@ -2205,9 +2205,15 @@ mod tests {
     #[test]
     fn test_compile_datetime_literals() {
         let mut compiler = Compiler::new();
-        let r1 = compiler.compile_expr(&Expr::Literal(LiteralValue::CurrentDate), None).unwrap();
-        let r2 = compiler.compile_expr(&Expr::Literal(LiteralValue::CurrentTime), None).unwrap();
-        let r3 = compiler.compile_expr(&Expr::Literal(LiteralValue::CurrentTimestamp), None).unwrap();
+        let r1 = compiler
+            .compile_expr(&Expr::Literal(LiteralValue::CurrentDate), None)
+            .unwrap();
+        let r2 = compiler
+            .compile_expr(&Expr::Literal(LiteralValue::CurrentTime), None)
+            .unwrap();
+        let r3 = compiler
+            .compile_expr(&Expr::Literal(LiteralValue::CurrentTimestamp), None)
+            .unwrap();
         assert_eq!(r1, 0);
         assert_eq!(r2, 1);
         assert_eq!(r3, 2);
@@ -2229,7 +2235,9 @@ mod tests {
             expr: Box::new(Expr::Literal(LiteralValue::Integer(2))),
         };
         let addrs1 = compiler.compile_where_expr(&is_null_expr, None).unwrap();
-        let addrs2 = compiler.compile_where_expr(&is_not_null_expr, None).unwrap();
+        let addrs2 = compiler
+            .compile_where_expr(&is_not_null_expr, None)
+            .unwrap();
         assert_eq!(addrs1.len(), 1);
         assert_eq!(addrs2.len(), 1);
     }
@@ -2986,5 +2994,3 @@ mod tests {
         ));
     }
 }
-
-

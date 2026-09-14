@@ -237,27 +237,48 @@ fn test_compile_errors_and_edge_cases() {
 
     // 8. Insert errors
     let ast_insert_no_schema = parse_stmt("INSERT INTO users VALUES (1);").unwrap();
-    assert!(matches!(compile(&ast_insert_no_schema), Err(CodegenError::Schema(_))));
+    assert!(matches!(
+        compile(&ast_insert_no_schema),
+        Err(CodegenError::Schema(_))
+    ));
 
     let ast_insert_nonexistent = parse_stmt("INSERT INTO nonexistent VALUES (1);").unwrap();
-    assert!(matches!(compile_with_schema(&ast_insert_nonexistent, &schema), Err(CodegenError::Schema(_))));
+    assert!(matches!(
+        compile_with_schema(&ast_insert_nonexistent, &schema),
+        Err(CodegenError::Schema(_))
+    ));
 
     // 9. Delete errors
     let ast_delete_no_schema = parse_stmt("DELETE FROM users;").unwrap();
-    assert!(matches!(compile(&ast_delete_no_schema), Err(CodegenError::Schema(_))));
+    assert!(matches!(
+        compile(&ast_delete_no_schema),
+        Err(CodegenError::Schema(_))
+    ));
 
     let ast_delete_nonexistent = parse_stmt("DELETE FROM nonexistent;").unwrap();
-    assert!(matches!(compile_with_schema(&ast_delete_nonexistent, &schema), Err(CodegenError::Schema(_))));
+    assert!(matches!(
+        compile_with_schema(&ast_delete_nonexistent, &schema),
+        Err(CodegenError::Schema(_))
+    ));
 
     // 10. Update errors
     let ast_update_no_schema = parse_stmt("UPDATE users SET id = 1;").unwrap();
-    assert!(matches!(compile(&ast_update_no_schema), Err(CodegenError::Schema(_))));
+    assert!(matches!(
+        compile(&ast_update_no_schema),
+        Err(CodegenError::Schema(_))
+    ));
 
     let ast_update_nonexistent = parse_stmt("UPDATE nonexistent SET id = 1;").unwrap();
-    assert!(matches!(compile_with_schema(&ast_update_nonexistent, &schema), Err(CodegenError::Schema(_))));
+    assert!(matches!(
+        compile_with_schema(&ast_update_nonexistent, &schema),
+        Err(CodegenError::Schema(_))
+    ));
 
     let ast_update_bad_col = parse_stmt("UPDATE users SET bad_col = 1;").unwrap();
-    assert!(matches!(compile_with_schema(&ast_update_bad_col, &schema), Err(CodegenError::Schema(_))));
+    assert!(matches!(
+        compile_with_schema(&ast_update_bad_col, &schema),
+        Err(CodegenError::Schema(_))
+    ));
 }
 
 #[test]
@@ -269,27 +290,48 @@ fn test_compile_literals_and_unary() {
         body: SelectBody::Simple(SimpleSelect {
             distinct: DistinctKind::All,
             result_columns: vec![
-                ResultColumn::Expr { expr: Expr::Literal(LiteralValue::True), alias: None },
-                ResultColumn::Expr { expr: Expr::Literal(LiteralValue::False), alias: None },
-                ResultColumn::Expr { expr: Expr::Literal(LiteralValue::Null), alias: None },
                 ResultColumn::Expr {
-                    expr: Expr::Unary { op: UnaryOp::Plus, operand: Box::new(Expr::Literal(LiteralValue::Integer(42))) },
-                    alias: None
+                    expr: Expr::Literal(LiteralValue::True),
+                    alias: None,
+                },
+                ResultColumn::Expr {
+                    expr: Expr::Literal(LiteralValue::False),
+                    alias: None,
+                },
+                ResultColumn::Expr {
+                    expr: Expr::Literal(LiteralValue::Null),
+                    alias: None,
+                },
+                ResultColumn::Expr {
+                    expr: Expr::Unary {
+                        op: UnaryOp::Plus,
+                        operand: Box::new(Expr::Literal(LiteralValue::Integer(42))),
+                    },
+                    alias: None,
                 },
                 ResultColumn::Expr {
                     expr: Expr::Unary {
                         op: UnaryOp::Minus,
-                        operand: Box::new(Expr::Unary { op: UnaryOp::Minus, operand: Box::new(Expr::Literal(LiteralValue::Integer(10))) })
+                        operand: Box::new(Expr::Unary {
+                            op: UnaryOp::Minus,
+                            operand: Box::new(Expr::Literal(LiteralValue::Integer(10))),
+                        }),
                     },
-                    alias: None
+                    alias: None,
                 },
                 ResultColumn::Expr {
-                    expr: Expr::Unary { op: UnaryOp::Not, operand: Box::new(Expr::Literal(LiteralValue::Integer(0))) },
-                    alias: None
+                    expr: Expr::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(Expr::Literal(LiteralValue::Integer(0))),
+                    },
+                    alias: None,
                 },
                 ResultColumn::Expr {
-                    expr: Expr::Unary { op: UnaryOp::Not, operand: Box::new(Expr::Literal(LiteralValue::Integer(1))) },
-                    alias: None
+                    expr: Expr::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(Expr::Literal(LiteralValue::Integer(1))),
+                    },
+                    alias: None,
                 },
             ],
             from: None,
@@ -320,7 +362,10 @@ fn test_compile_unimplemented_and_errors() {
         schema: None,
         name: "users".to_string(),
     }));
-    assert!(matches!(compile(&drop_stmt), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile(&drop_stmt),
+        Err(CodegenError::NotImplemented)
+    ));
 
     // 2. Unimplemented SelectBody (Values / Compound)
     let compound_select = Stmt::Select(Box::new(SelectStmt {
@@ -349,7 +394,10 @@ fn test_compile_unimplemented_and_errors() {
         order_by: vec![],
         limit: None,
     }));
-    assert!(matches!(compile(&compound_select), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile(&compound_select),
+        Err(CodegenError::NotImplemented)
+    ));
 
     // 3. Select literal with Star result column -> NotImplemented
     let star_literal_select = Stmt::Select(Box::new(SelectStmt {
@@ -366,7 +414,10 @@ fn test_compile_unimplemented_and_errors() {
         order_by: vec![],
         limit: None,
     }));
-    assert!(matches!(compile(&star_literal_select), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile(&star_literal_select),
+        Err(CodegenError::NotImplemented)
+    ));
 
     // 4. Select from multiple tables or joins -> NotImplemented
     let join_select = Stmt::Select(Box::new(SelectStmt {
@@ -399,7 +450,10 @@ fn test_compile_unimplemented_and_errors() {
         order_by: vec![],
         limit: None,
     }));
-    assert!(matches!(compile_with_schema(&join_select, &schema), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile_with_schema(&join_select, &schema),
+        Err(CodegenError::NotImplemented)
+    ));
 
     // 5. Select from subquery -> NotImplemented
     let subquery_select = Stmt::Select(Box::new(SelectStmt {
@@ -435,7 +489,10 @@ fn test_compile_unimplemented_and_errors() {
         order_by: vec![],
         limit: None,
     }));
-    assert!(matches!(compile_with_schema(&subquery_select, &schema), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile_with_schema(&subquery_select, &schema),
+        Err(CodegenError::NotImplemented)
+    ));
 
     // 6. Aggregate select errors
     let agg_no_schema = Stmt::Select(Box::new(SelectStmt {
@@ -469,7 +526,10 @@ fn test_compile_unimplemented_and_errors() {
         order_by: vec![],
         limit: None,
     }));
-    assert!(matches!(compile(&agg_no_schema), Err(CodegenError::Schema(_))));
+    assert!(matches!(
+        compile(&agg_no_schema),
+        Err(CodegenError::Schema(_))
+    ));
 
     // 7. Aggregate select on join -> NotImplemented
     let mut agg_join = agg_no_schema.clone();
@@ -485,7 +545,10 @@ fn test_compile_unimplemented_and_errors() {
             }
         }
     }
-    assert!(matches!(compile_with_schema(&agg_join, &schema), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile_with_schema(&agg_join, &schema),
+        Err(CodegenError::NotImplemented)
+    ));
 
     // 8. Aggregate select on subquery -> NotImplemented
     let mut agg_subquery = agg_no_schema.clone();
@@ -512,7 +575,10 @@ fn test_compile_unimplemented_and_errors() {
             }
         }
     }
-    assert!(matches!(compile_with_schema(&agg_subquery, &schema), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile_with_schema(&agg_subquery, &schema),
+        Err(CodegenError::NotImplemented)
+    ));
 
     // 9. Aggregate select table not found
     let mut agg_not_found = agg_no_schema.clone();
@@ -528,7 +594,10 @@ fn test_compile_unimplemented_and_errors() {
             }
         }
     }
-    assert!(matches!(compile_with_schema(&agg_not_found, &schema), Err(CodegenError::Schema(_))));
+    assert!(matches!(
+        compile_with_schema(&agg_not_found, &schema),
+        Err(CodegenError::Schema(_))
+    ));
 
     // 10. Unsupported Expr in compile_expr
     let ast_subquery_expr = Stmt::Select(Box::new(SelectStmt {
@@ -564,7 +633,10 @@ fn test_compile_unimplemented_and_errors() {
         order_by: vec![],
         limit: None,
     }));
-    assert!(matches!(compile(&ast_subquery_expr), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile(&ast_subquery_expr),
+        Err(CodegenError::NotImplemented)
+    ));
 
     // 11. Unsupported BinaryOp (e.g. Concat)
     let ast_concat = Stmt::Select(Box::new(SelectStmt {
@@ -588,7 +660,10 @@ fn test_compile_unimplemented_and_errors() {
         order_by: vec![],
         limit: None,
     }));
-    assert!(matches!(compile(&ast_concat), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile(&ast_concat),
+        Err(CodegenError::NotImplemented)
+    ));
 
     // 12. Aggregate select with Star result column in group by / non-group by
     let agg_star_result = Stmt::Select(Box::new(SelectStmt {
@@ -629,7 +704,10 @@ fn test_compile_unimplemented_and_errors() {
         order_by: vec![],
         limit: None,
     }));
-    assert!(matches!(compile_with_schema(&agg_star_result, &schema), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile_with_schema(&agg_star_result, &schema),
+        Err(CodegenError::NotImplemented)
+    ));
 
     let agg_star_no_gb = Stmt::Select(Box::new(SelectStmt {
         with: None,
@@ -665,7 +743,10 @@ fn test_compile_unimplemented_and_errors() {
         order_by: vec![],
         limit: None,
     }));
-    assert!(matches!(compile_with_schema(&agg_star_no_gb, &schema), Err(CodegenError::NotImplemented)));
+    assert!(matches!(
+        compile_with_schema(&agg_star_no_gb, &schema),
+        Err(CodegenError::NotImplemented)
+    ));
 }
 
 #[test]
@@ -814,5 +895,3 @@ fn test_compile_aggregate_and_group_by_variations() {
     let vm8 = compile_with_schema(&multi_agg_gb, &schema).unwrap();
     assert!(!vm8.ops.is_empty());
 }
-
-

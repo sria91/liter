@@ -327,7 +327,11 @@ mod tests {
         let mut buf = [0u8; 9];
         for (val, expected_len) in test_values {
             let n = encode_varint(val, &mut buf).unwrap();
-            assert_eq!(n, expected_len, "Value {} expected len {}", val, expected_len);
+            assert_eq!(
+                n, expected_len,
+                "Value {} expected len {}",
+                val, expected_len
+            );
             let (decoded, consumed) = decode_varint(&buf[..n]).unwrap();
             assert_eq!(decoded, val);
             assert_eq!(consumed, expected_len);
@@ -418,37 +422,55 @@ mod tests {
         let (v, n) = decode_value(1, &[0xFE]).unwrap();
         assert_eq!(v, Value::Int(-2));
         assert_eq!(n, 1);
-        assert!(matches!(decode_value(1, &[]), Err(RecordError::BufferTooShort)));
+        assert!(matches!(
+            decode_value(1, &[]),
+            Err(RecordError::BufferTooShort)
+        ));
 
         // 2 bytes
         let (v, n) = decode_value(2, &[0x01, 0x00]).unwrap();
         assert_eq!(v, Value::Int(256));
         assert_eq!(n, 2);
-        assert!(matches!(decode_value(2, &[1]), Err(RecordError::BufferTooShort)));
+        assert!(matches!(
+            decode_value(2, &[1]),
+            Err(RecordError::BufferTooShort)
+        ));
 
         // 3 bytes (24-bit)
         let (v, n) = decode_value(3, &[0x01, 0x02, 0x03]).unwrap();
         assert_eq!(v, Value::Int(66051));
         assert_eq!(n, 3);
-        assert!(matches!(decode_value(3, &[1, 2]), Err(RecordError::BufferTooShort)));
+        assert!(matches!(
+            decode_value(3, &[1, 2]),
+            Err(RecordError::BufferTooShort)
+        ));
 
         // 4 bytes (32-bit)
         let (v, n) = decode_value(4, &[0x00, 0x01, 0x00, 0x00]).unwrap();
         assert_eq!(v, Value::Int(65536));
         assert_eq!(n, 4);
-        assert!(matches!(decode_value(4, &[1, 2, 3]), Err(RecordError::BufferTooShort)));
+        assert!(matches!(
+            decode_value(4, &[1, 2, 3]),
+            Err(RecordError::BufferTooShort)
+        ));
 
         // 6 bytes (48-bit)
         let (v, n) = decode_value(5, &[0x00, 0x00, 0x01, 0x00, 0x00, 0x00]).unwrap();
         assert_eq!(v, Value::Int(16777216));
         assert_eq!(n, 6);
-        assert!(matches!(decode_value(5, &[1, 2, 3, 4, 5]), Err(RecordError::BufferTooShort)));
+        assert!(matches!(
+            decode_value(5, &[1, 2, 3, 4, 5]),
+            Err(RecordError::BufferTooShort)
+        ));
 
         // 8 bytes (64-bit)
         let (v, n) = decode_value(6, &[0, 0, 0, 0, 1, 0, 0, 0]).unwrap();
         assert_eq!(v, Value::Int(16777216));
         assert_eq!(n, 8);
-        assert!(matches!(decode_value(6, &[1, 2, 3, 4, 5, 6, 7]), Err(RecordError::BufferTooShort)));
+        assert!(matches!(
+            decode_value(6, &[1, 2, 3, 4, 5, 6, 7]),
+            Err(RecordError::BufferTooShort)
+        ));
     }
 
     #[test]
@@ -458,7 +480,10 @@ mod tests {
         let (v, n) = decode_value(7, &bytes).unwrap();
         assert_eq!(v, Value::Real(f));
         assert_eq!(n, 8);
-        assert!(matches!(decode_value(7, &[1, 2, 3]), Err(RecordError::BufferTooShort)));
+        assert!(matches!(
+            decode_value(7, &[1, 2, 3]),
+            Err(RecordError::BufferTooShort)
+        ));
     }
 
     #[test]
@@ -467,17 +492,29 @@ mod tests {
         let (v, n) = decode_value(18, b"xyz").unwrap();
         assert_eq!(v, Value::Blob(b"xyz".to_vec()));
         assert_eq!(n, 3);
-        assert!(matches!(decode_value(18, b"xy"), Err(RecordError::BufferTooShort)));
+        assert!(matches!(
+            decode_value(18, b"xy"),
+            Err(RecordError::BufferTooShort)
+        ));
 
         // Text: length 5 -> serial_type = 5*2 + 13 = 23
         let (v, n) = decode_value(23, b"hello").unwrap();
         assert_eq!(v, Value::Text(b"hello".to_vec()));
         assert_eq!(n, 5);
-        assert!(matches!(decode_value(23, b"hell"), Err(RecordError::BufferTooShort)));
+        assert!(matches!(
+            decode_value(23, b"hell"),
+            Err(RecordError::BufferTooShort)
+        ));
 
         // Invalid serial types (10, 11)
-        assert!(matches!(decode_value(10, &[]), Err(RecordError::InvalidSerialType(10))));
-        assert!(matches!(decode_value(11, &[]), Err(RecordError::InvalidSerialType(11))));
+        assert!(matches!(
+            decode_value(10, &[]),
+            Err(RecordError::InvalidSerialType(10))
+        ));
+        assert!(matches!(
+            decode_value(11, &[]),
+            Err(RecordError::InvalidSerialType(11))
+        ));
     }
 
     #[test]

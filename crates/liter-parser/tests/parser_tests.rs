@@ -124,15 +124,31 @@ fn parse_delete() {
 fn parse_transactions_and_savepoints() {
     let cases = vec![
         ("BEGIN;", Stmt::Begin(TransactionKind::Deferred)),
-        ("BEGIN DEFERRED TRANSACTION;", Stmt::Begin(TransactionKind::Deferred)),
+        (
+            "BEGIN DEFERRED TRANSACTION;",
+            Stmt::Begin(TransactionKind::Deferred),
+        ),
         ("BEGIN IMMEDIATE;", Stmt::Begin(TransactionKind::Immediate)),
-        ("BEGIN EXCLUSIVE TRANSACTION;", Stmt::Begin(TransactionKind::Exclusive)),
+        (
+            "BEGIN EXCLUSIVE TRANSACTION;",
+            Stmt::Begin(TransactionKind::Exclusive),
+        ),
         ("COMMIT;", Stmt::Commit),
         ("COMMIT TRANSACTION;", Stmt::Commit),
         ("ROLLBACK;", Stmt::Rollback { savepoint: None }),
         ("ROLLBACK TRANSACTION;", Stmt::Rollback { savepoint: None }),
-        ("ROLLBACK TO sp1;", Stmt::Rollback { savepoint: Some("sp1".to_string()) }),
-        ("ROLLBACK TRANSACTION TO SAVEPOINT sp2;", Stmt::Rollback { savepoint: Some("sp2".to_string()) }),
+        (
+            "ROLLBACK TO sp1;",
+            Stmt::Rollback {
+                savepoint: Some("sp1".to_string()),
+            },
+        ),
+        (
+            "ROLLBACK TRANSACTION TO SAVEPOINT sp2;",
+            Stmt::Rollback {
+                savepoint: Some("sp2".to_string()),
+            },
+        ),
         ("SAVEPOINT sp3;", Stmt::Savepoint("sp3".to_string())),
         ("RELEASE sp4;", Stmt::Release("sp4".to_string())),
         ("RELEASE SAVEPOINT sp5;", Stmt::Release("sp5".to_string())),
@@ -200,24 +216,66 @@ fn parse_insert_update_delete_variants() {
 fn parse_errors() {
     // EOF error
     assert!(matches!(parse_stmt(""), Err(ParseError::UnexpectedEof)));
-    assert!(matches!(parse_stmt("SELECT"), Err(ParseError::UnexpectedEof)));
-    assert!(matches!(parse_stmt("BEGIN DEFERRED"), Ok(Stmt::Begin(TransactionKind::Deferred))));
+    assert!(matches!(
+        parse_stmt("SELECT"),
+        Err(ParseError::UnexpectedEof)
+    ));
+    assert!(matches!(
+        parse_stmt("BEGIN DEFERRED"),
+        Ok(Stmt::Begin(TransactionKind::Deferred))
+    ));
 
     // Syntax errors
-    assert!(matches!(parse_stmt("SELECT 1 FROM t ORDER BY a NULLS FOO"), Err(ParseError::SyntaxError(_))));
-    assert!(matches!(parse_stmt("CREATE INDEX idx ON t(a)"), Err(ParseError::NotImplemented)));
-    assert!(matches!(parse_stmt("FOOBAR"), Err(ParseError::SyntaxError(_))));
-    assert!(matches!(parse_stmt("SELECT (1 + 2"), Err(ParseError::UnexpectedEof)));
-    assert!(matches!(parse_stmt("SELECT (1 + 2 +)"), Err(ParseError::SyntaxError(_))));
-    assert!(matches!(parse_stmt("INSERT INTO"), Err(ParseError::UnexpectedEof)));
-    assert!(matches!(parse_stmt("INSERT INTO 123"), Err(ParseError::SyntaxError(_))));
-    assert!(matches!(parse_stmt("CREATE TABLE"), Err(ParseError::UnexpectedEof)));
-    assert!(matches!(parse_stmt("CREATE TABLE t (id INT;"), Err(ParseError::SyntaxError(_))));
-    assert!(matches!(parse_stmt("UPDATE 123"), Err(ParseError::SyntaxError(_))));
-    assert!(matches!(parse_stmt("DELETE FROM 123"), Err(ParseError::SyntaxError(_))));
+    assert!(matches!(
+        parse_stmt("SELECT 1 FROM t ORDER BY a NULLS FOO"),
+        Err(ParseError::SyntaxError(_))
+    ));
+    assert!(matches!(
+        parse_stmt("CREATE INDEX idx ON t(a)"),
+        Err(ParseError::NotImplemented)
+    ));
+    assert!(matches!(
+        parse_stmt("FOOBAR"),
+        Err(ParseError::SyntaxError(_))
+    ));
+    assert!(matches!(
+        parse_stmt("SELECT (1 + 2"),
+        Err(ParseError::UnexpectedEof)
+    ));
+    assert!(matches!(
+        parse_stmt("SELECT (1 + 2 +)"),
+        Err(ParseError::SyntaxError(_))
+    ));
+    assert!(matches!(
+        parse_stmt("INSERT INTO"),
+        Err(ParseError::UnexpectedEof)
+    ));
+    assert!(matches!(
+        parse_stmt("INSERT INTO 123"),
+        Err(ParseError::SyntaxError(_))
+    ));
+    assert!(matches!(
+        parse_stmt("CREATE TABLE"),
+        Err(ParseError::UnexpectedEof)
+    ));
+    assert!(matches!(
+        parse_stmt("CREATE TABLE t (id INT;"),
+        Err(ParseError::SyntaxError(_))
+    ));
+    assert!(matches!(
+        parse_stmt("UPDATE 123"),
+        Err(ParseError::SyntaxError(_))
+    ));
+    assert!(matches!(
+        parse_stmt("DELETE FROM 123"),
+        Err(ParseError::SyntaxError(_))
+    ));
 
     // Tokenizer / Lexer errors
-    assert!(matches!(parse_stmt("SELECT 'unclosed string"), Err(ParseError::TokenError(_))));
+    assert!(matches!(
+        parse_stmt("SELECT 'unclosed string"),
+        Err(ParseError::TokenError(_))
+    ));
 }
 
 #[test]
@@ -241,19 +299,34 @@ fn test_internal_parser_methods() {
 
     // Test consume on tokenizer error
     let mut err_parser = Parser::new("'unclosed");
-    assert!(matches!(err_parser.consume(), Err(ParseError::TokenError(_))));
+    assert!(matches!(
+        err_parser.consume(),
+        Err(ParseError::TokenError(_))
+    ));
 
     // Test expect with wrong token and EOF
     let mut p = Parser::new("123");
-    assert!(matches!(p.expect(Token::Select), Err(ParseError::SyntaxError(_))));
+    assert!(matches!(
+        p.expect(Token::Select),
+        Err(ParseError::SyntaxError(_))
+    ));
     let mut p_eof = Parser::new("");
-    assert!(matches!(p_eof.expect(Token::Select), Err(ParseError::UnexpectedEof)));
+    assert!(matches!(
+        p_eof.expect(Token::Select),
+        Err(ParseError::UnexpectedEof)
+    ));
 
     // Test expect_ident
     let mut p_id = Parser::new("123");
-    assert!(matches!(p_id.expect_ident(), Err(ParseError::SyntaxError(_))));
+    assert!(matches!(
+        p_id.expect_ident(),
+        Err(ParseError::SyntaxError(_))
+    ));
     let mut p_id_eof = Parser::new("");
-    assert!(matches!(p_id_eof.expect_ident(), Err(ParseError::UnexpectedEof)));
+    assert!(matches!(
+        p_id_eof.expect_ident(),
+        Err(ParseError::UnexpectedEof)
+    ));
 }
 
 #[test]
@@ -261,9 +334,15 @@ fn test_create_table_column_types() {
     // Test column with no type, ident type, and integer type
     let sql = "CREATE TABLE t (col1, col2 TEXT, col3 100);";
     let stmt = parse_stmt(sql).unwrap();
-    let Stmt::Create(c) = stmt else { panic!("expected Create") };
-    let CreateStmt::Table(t) = *c else { panic!("expected Table") };
-    let CreateTableBody::Columns { columns, .. } = t.body else { panic!("expected Columns") };
+    let Stmt::Create(c) = stmt else {
+        panic!("expected Create")
+    };
+    let CreateStmt::Table(t) = *c else {
+        panic!("expected Table")
+    };
+    let CreateTableBody::Columns { columns, .. } = t.body else {
+        panic!("expected Columns")
+    };
     assert_eq!(columns.len(), 3);
     assert!(columns[0].type_name.is_none());
     assert_eq!(columns[1].type_name.as_ref().unwrap().name, "TEXT");

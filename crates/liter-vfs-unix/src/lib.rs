@@ -220,7 +220,10 @@ impl Vfs for UnixVfs {
     fn delete(&self, path: &Path, sync_dir: bool) -> io::Result<()> {
         std::fs::remove_file(path)?;
         if sync_dir {
-            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
             let dir = File::open(parent)?;
             dir.sync_all()?;
         }

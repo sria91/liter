@@ -1014,7 +1014,10 @@ mod tests {
         assert!(func_ifnull(&[Mem::Null]).is_err());
         assert!(func_ifnull(&[Mem::Null, Mem::Int(1), Mem::Int(2)]).is_err());
         assert_eq!(func_ifnull(&[Mem::Null, Mem::Int(7)]).unwrap(), Mem::Int(7));
-        assert_eq!(func_ifnull(&[Mem::Int(3), Mem::Int(7)]).unwrap(), Mem::Int(3));
+        assert_eq!(
+            func_ifnull(&[Mem::Int(3), Mem::Int(7)]).unwrap(),
+            Mem::Int(3)
+        );
     }
 
     // ── substr ──────────────────────────────────────────────────────────────
@@ -1428,9 +1431,6 @@ mod tests {
             Mem::Null
         );
         assert!(dispatch_function("zeroblob", &[]).is_err());
-        assert_eq!(
-            func_length(&[Mem::ZeroBlob(10)]).unwrap(),
-            Mem::Int(10)
-        );
+        assert_eq!(func_length(&[Mem::ZeroBlob(10)]).unwrap(), Mem::Int(10));
     }
 }

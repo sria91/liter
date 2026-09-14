@@ -4194,7 +4194,8 @@ mod tests {
         let payload = liter_record::encode_record(&[
             liter_record::Value::Blob(vec![1, 2, 3]),
             liter_record::Value::Null,
-        ]).unwrap();
+        ])
+        .unwrap();
         let mut cur = btree.cursor(pgno, true).unwrap();
         cur.insert(&1u64.to_be_bytes(), &payload, false).unwrap();
         btree.commit().unwrap();
@@ -4242,7 +4243,10 @@ mod tests {
             p5: 0,
         });
         assert_eq!(vm.step(&btree, &mut cursors).unwrap(), StepResult::Done);
-        assert_eq!(vm.regs[0], Mem::Blob(Arc::from(vec![1, 2, 3].into_boxed_slice())));
+        assert_eq!(
+            vm.regs[0],
+            Mem::Blob(Arc::from(vec![1, 2, 3].into_boxed_slice()))
+        );
         assert_eq!(vm.regs[1], Mem::Null);
     }
 

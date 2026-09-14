@@ -337,7 +337,10 @@ mod tests {
             .unwrap();
 
         assert!(vfs.access(&path, AccessFlags::EXISTS).unwrap());
-        assert_eq!(file.device_characteristics(), DeviceCharacteristics::UNDELETABLE_WHEN_OPEN);
+        assert_eq!(
+            file.device_characteristics(),
+            DeviceCharacteristics::UNDELETABLE_WHEN_OPEN
+        );
         assert_eq!(file.sector_size(), 4096);
 
         // Write and read

@@ -235,7 +235,10 @@ mod tests {
     fn test_json_error_debug() {
         let err = JsonError::WrongArgCount("test".into());
         assert_eq!(format!("{err:?}"), "WrongArgCount(\"test\")");
-        assert_eq!(format!("{err}"), "wrong number of arguments to function test()");
+        assert_eq!(
+            format!("{err}"),
+            "wrong number of arguments to function test()"
+        );
     }
 
     #[test]
@@ -406,6 +409,9 @@ mod tests {
     #[test]
     fn test_json_object_null_key_errors() {
         let err = func_json_object(&[Mem::Null, Mem::Int(1)]).unwrap_err();
-        assert_eq!(err.to_string(), "wrong number of arguments to function json_object label cannot be null()");
+        assert_eq!(
+            err.to_string(),
+            "wrong number of arguments to function json_object label cannot be null()"
+        );
     }
 }
