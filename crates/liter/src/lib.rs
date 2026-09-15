@@ -1047,10 +1047,7 @@ mod tests {
     fn test_mem_to_value_all_variants() {
         assert_eq!(mem_to_value(&liter_vdbe::Mem::Null), Value::Null);
         assert_eq!(mem_to_value(&liter_vdbe::Mem::Int(42)), Value::Int(42));
-        assert_eq!(
-            mem_to_value(&liter_vdbe::Mem::Real(3.5)),
-            Value::Real(3.5)
-        );
+        assert_eq!(mem_to_value(&liter_vdbe::Mem::Real(3.5)), Value::Real(3.5));
         assert_eq!(
             mem_to_value(&liter_vdbe::Mem::Text("abc".into())),
             Value::Text(b"abc".to_vec())
