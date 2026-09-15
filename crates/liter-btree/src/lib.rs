@@ -520,7 +520,7 @@ impl BTreeCursor<'_> {
         divider_rowid: u64,
     ) -> BTreeResult<(PageNumber, u16, u16)> {
         let mut pgno = self.root_page;
-        loop {
+        for _ in 0..MAX_DEPTH {
             let pd = self.page(pgno)?;
             let hdr = PageHeader::parse(&pd, pgno)?;
             if hdr.kind.is_leaf() {
@@ -546,6 +546,7 @@ impl BTreeCursor<'_> {
                 hdr.rightmost_child
             };
         }
+        Err(BTreeError::Corrupt)
     }
 
     /// Delete the entry at the current cursor position.
