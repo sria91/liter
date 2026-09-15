@@ -106,8 +106,8 @@ pub fn decode_value(serial_type: u64, payload: &[u8]) -> RecordResult<(Value, us
             if payload.len() < 3 {
                 return Err(RecordError::BufferTooShort);
             }
-            let v =
-                ((payload[0] as i32) << 16 | (payload[1] as i32) << 8 | payload[2] as i32) as i64;
+            let fill = if payload[0] & 0x80 != 0 { 0xFF } else { 0x00 };
+            let v = i32::from_be_bytes([fill, payload[0], payload[1], payload[2]]) as i64;
             Ok((Value::Int(v), 3))
         }
         4 => {
@@ -121,7 +121,8 @@ pub fn decode_value(serial_type: u64, payload: &[u8]) -> RecordResult<(Value, us
             if payload.len() < 6 {
                 return Err(RecordError::BufferTooShort);
             }
-            let mut arr = [0u8; 8];
+            let fill = if payload[0] & 0x80 != 0 { 0xFF } else { 0x00 };
+            let mut arr = [fill; 8];
             arr[2..8].copy_from_slice(&payload[0..6]);
             let v = i64::from_be_bytes(arr);
             Ok((Value::Int(v), 6))
@@ -301,6 +302,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn varint_roundtrip_all_byte_lengths() {
+        // Test values that encode to 1, 2, 3, 4, 5, 6, 7, 8, and 9 bytes
+        let test_values = [
+            (0u64, 1),
+            (127, 1),
+            (128, 2),
+            (16383, 2),
+            (16384, 3),
+            (2097151, 3),
+            (2097152, 4),
+            (268435455, 4),
+            (268435456, 5),
+            (34359738367, 5),
+            (34359738368, 6),
+            (4398046511103, 6),
+            (4398046511104, 7),
+            (562949953421311, 7),
+            (562949953421312, 8),
+            ((1u64 << 56) - 1, 8),
+            (1u64 << 56, 9),
+            (u64::MAX, 9),
+        ];
+
+        let mut buf = [0u8; 9];
+        for (val, expected_len) in test_values {
+            let n = encode_varint(val, &mut buf).unwrap();
+            assert_eq!(
+                n, expected_len,
+                "Value {} expected len {}",
+                val, expected_len
+            );
+            let (decoded, consumed) = decode_varint(&buf[..n]).unwrap();
+            assert_eq!(decoded, val);
+            assert_eq!(consumed, expected_len);
+        }
+    }
+
+    #[test]
+    fn error_display_and_value_helpers() {
+        let e1 = RecordError::BufferTooShort;
+        let e2 = RecordError::InvalidSerialType(42);
+        let e3 = RecordError::VarintOverflow;
+        assert_eq!(format!("{e1}"), "buffer too short");
+        assert_eq!(format!("{e2}"), "invalid serial type: 42");
+        assert_eq!(format!("{e3}"), "varint overflow");
+
+        let v = Value::ZeroBlob(100);
+        let cloned = v.clone();
+        assert_eq!(v, cloned);
+        assert!(format!("{v:?}").contains("ZeroBlob(100)"));
+    }
+
+    #[test]
     fn varint_roundtrip_small() {
         let mut buf = [0u8; 9];
         let n = encode_varint(42, &mut buf).unwrap();
@@ -319,6 +373,33 @@ mod tests {
     }
 
     #[test]
+    fn varint_roundtrip_maximum() {
+        let mut buf = [0u8; 9];
+        let orig = u64::MAX;
+        let n = encode_varint(orig, &mut buf).unwrap();
+        assert_eq!(n, 9);
+        let (v, m) = decode_varint(&buf[..n]).unwrap();
+        assert_eq!(v, orig);
+        assert_eq!(m, 9);
+    }
+
+    #[test]
+    fn varint_errors() {
+        let mut short_buf = [0u8; 5];
+        assert!(matches!(
+            encode_varint(100, &mut short_buf),
+            Err(RecordError::BufferTooShort)
+        ));
+
+        // Incomplete varint with continuation bit set
+        let incomplete = [0x80u8, 0x80, 0x80];
+        assert!(matches!(
+            decode_varint(&incomplete),
+            Err(RecordError::BufferTooShort)
+        ));
+    }
+
+    #[test]
     fn decode_null_value() {
         let (v, n) = decode_value(0, &[]).unwrap();
         assert_eq!(v, Value::Null);
@@ -326,10 +407,75 @@ mod tests {
     }
 
     #[test]
-    fn decode_int1() {
+    fn decode_int_constants() {
+        let (v0, n0) = decode_value(8, &[]).unwrap();
+        assert_eq!(v0, Value::Int(0));
+        assert_eq!(n0, 0);
+
+        let (v1, n1) = decode_value(9, &[]).unwrap();
+        assert_eq!(v1, Value::Int(1));
+        assert_eq!(n1, 0);
+    }
+
+    #[test]
+    fn decode_integers_all_sizes() {
+        // 1 byte
         let (v, n) = decode_value(1, &[0xFE]).unwrap();
         assert_eq!(v, Value::Int(-2));
         assert_eq!(n, 1);
+        assert!(matches!(
+            decode_value(1, &[]),
+            Err(RecordError::BufferTooShort)
+        ));
+
+        // 2 bytes
+        let (v, n) = decode_value(2, &[0x01, 0x00]).unwrap();
+        assert_eq!(v, Value::Int(256));
+        assert_eq!(n, 2);
+        assert!(matches!(
+            decode_value(2, &[1]),
+            Err(RecordError::BufferTooShort)
+        ));
+
+        // 3 bytes (24-bit)
+        let (v, n) = decode_value(3, &[0x01, 0x02, 0x03]).unwrap();
+        assert_eq!(v, Value::Int(66051));
+        assert_eq!(n, 3);
+        let (v_neg, _) = decode_value(3, &[0xFF, 0xFE, 0xFD]).unwrap();
+        assert_eq!(v_neg, Value::Int(-259));
+        assert!(matches!(
+            decode_value(3, &[1, 2]),
+            Err(RecordError::BufferTooShort)
+        ));
+
+        // 4 bytes (32-bit)
+        let (v, n) = decode_value(4, &[0x00, 0x01, 0x00, 0x00]).unwrap();
+        assert_eq!(v, Value::Int(65536));
+        assert_eq!(n, 4);
+        assert!(matches!(
+            decode_value(4, &[1, 2, 3]),
+            Err(RecordError::BufferTooShort)
+        ));
+
+        // 6 bytes (48-bit)
+        let (v, n) = decode_value(5, &[0x00, 0x00, 0x01, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(v, Value::Int(16777216));
+        assert_eq!(n, 6);
+        let (v_neg, _) = decode_value(5, &[0xFF, 0xFF, 0xFE, 0xFD, 0xFC, 0xFB]).unwrap();
+        assert_eq!(v_neg, Value::Int(-16909061));
+        assert!(matches!(
+            decode_value(5, &[1, 2, 3, 4, 5]),
+            Err(RecordError::BufferTooShort)
+        ));
+
+        // 8 bytes (64-bit)
+        let (v, n) = decode_value(6, &[0, 0, 0, 0, 1, 0, 0, 0]).unwrap();
+        assert_eq!(v, Value::Int(16777216));
+        assert_eq!(n, 8);
+        assert!(matches!(
+            decode_value(6, &[1, 2, 3, 4, 5, 6, 7]),
+            Err(RecordError::BufferTooShort)
+        ));
     }
 
     #[test]
@@ -339,5 +485,82 @@ mod tests {
         let (v, n) = decode_value(7, &bytes).unwrap();
         assert_eq!(v, Value::Real(f));
         assert_eq!(n, 8);
+        assert!(matches!(
+            decode_value(7, &[1, 2, 3]),
+            Err(RecordError::BufferTooShort)
+        ));
+    }
+
+    #[test]
+    fn decode_blob_and_text() {
+        // Blob: length 3 -> serial_type = 3*2 + 12 = 18
+        let (v, n) = decode_value(18, b"xyz").unwrap();
+        assert_eq!(v, Value::Blob(b"xyz".to_vec()));
+        assert_eq!(n, 3);
+        assert!(matches!(
+            decode_value(18, b"xy"),
+            Err(RecordError::BufferTooShort)
+        ));
+
+        // Text: length 5 -> serial_type = 5*2 + 13 = 23
+        let (v, n) = decode_value(23, b"hello").unwrap();
+        assert_eq!(v, Value::Text(b"hello".to_vec()));
+        assert_eq!(n, 5);
+        assert!(matches!(
+            decode_value(23, b"hell"),
+            Err(RecordError::BufferTooShort)
+        ));
+
+        // Invalid serial types (10, 11)
+        assert!(matches!(
+            decode_value(10, &[]),
+            Err(RecordError::InvalidSerialType(10))
+        ));
+        assert!(matches!(
+            decode_value(11, &[]),
+            Err(RecordError::InvalidSerialType(11))
+        ));
+    }
+
+    #[test]
+    fn encode_decode_record_roundtrip() {
+        let values = vec![
+            Value::Null,
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(-10),
+            Value::Int(300),
+            Value::Int(100_000),
+            Value::Int(10_000_000),
+            Value::Int(1_000_000_000_000),
+            Value::Int(i64::MIN),
+            Value::Real(2.5),
+            Value::Blob(vec![1, 2, 3, 4]),
+            Value::Text(b"SQLite Clone Liter".to_vec()),
+        ];
+
+        let encoded = encode_record(&values).unwrap();
+        let decoded = decode_record(&encoded).unwrap();
+        assert_eq!(values, decoded);
+    }
+
+    #[test]
+    fn decode_record_edge_cases() {
+        // Empty buffer
+        let empty = decode_record(&[]).unwrap();
+        assert_eq!(empty, vec![]);
+
+        // Header size larger than buffer
+        let bad_header = [0x10]; // header claims 16 bytes, but buffer is only 1 byte
+        assert!(matches!(
+            decode_record(&bad_header),
+            Err(RecordError::BufferTooShort)
+        ));
+
+        // ZeroBlob encode error
+        assert!(matches!(
+            encode_record(&[Value::ZeroBlob(10)]),
+            Err(RecordError::InvalidSerialType(0))
+        ));
     }
 }

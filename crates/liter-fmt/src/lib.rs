@@ -121,4 +121,33 @@ mod tests {
         let s = strftime("%Y-%m-%d", 2440587.5).unwrap();
         assert_eq!(s, "1970-01-01");
     }
+
+    #[test]
+    fn quote_or_null_some() {
+        assert_eq!(quote_string_or_null(Some("it's")), "'it''s'");
+    }
+
+    #[test]
+    fn strftime_all_time_codes_and_literal_percent() {
+        // 1970-01-01 12:34:56.5 UTC
+        let jd = 2440587.5 + (12.0 * 3600.0 + 34.0 * 60.0 + 56.5) / 86400.0;
+        let s = strftime("%%%H:%M:%S %f %s", jd).unwrap();
+        assert!(s.starts_with("%12:34:56"));
+    }
+
+    #[test]
+    fn strftime_unknown_specifier_errors() {
+        assert!(matches!(
+            strftime("%z", 2440587.5),
+            Err(FmtError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn strftime_trailing_percent_errors() {
+        assert!(matches!(
+            strftime("abc%", 2440587.5),
+            Err(FmtError::InvalidFormat)
+        ));
+    }
 }

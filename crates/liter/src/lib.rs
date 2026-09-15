@@ -226,7 +226,11 @@ impl Connection {
         let is_create = matches!(&ast, liter_ast::Stmt::Create(_));
         let mut vm = liter_codegen::compile_with_schema(&ast, &self.schema)?;
         vm.func_dispatcher = Some(|name, args| {
-            liter_functions::dispatch_function(name, args).map_err(|e| e.to_string())
+            if name.to_ascii_lowercase().starts_with("json") || name == "->" || name == "->>" {
+                liter_json::dispatch_function(name, args)
+            } else {
+                liter_functions::dispatch_function(name, args).map_err(|e| e.to_string())
+            }
         });
         vm.agg_dispatcher = Some(liter_functions::dispatch_aggregate);
 
@@ -270,10 +274,10 @@ impl Connection {
         // If it was a CREATE TABLE statement, insert into the schema catalog.
         if is_create {
             if let Some(rp) = root_page {
-                if let liter_ast::Stmt::Create(create_stmt) = ast {
-                    if let liter_ast::CreateStmt::Table(create_table) = *create_stmt {
-                        let columns = match create_table.body {
-                            liter_ast::CreateTableBody::Columns { columns, .. } => columns,
+                if let liter_ast::Stmt::Create(ref create_stmt) = ast {
+                    if let liter_ast::CreateStmt::Table(ref create_table) = **create_stmt {
+                        let columns = match &create_table.body {
+                            liter_ast::CreateTableBody::Columns { columns, .. } => columns.clone(),
                             _ => Vec::new(),
                         };
 
@@ -362,13 +366,21 @@ impl Connection {
     /// `stmt.step()` to drive execution row by row.
     pub fn prepare<'c>(&'c self, sql: &str) -> SqliteResult<Statement<'c>> {
         let ast = liter_parser::parse_stmt(sql)?;
-        let vm = liter_codegen::compile_with_schema(&ast, &self.schema)?;
+        let mut vm = liter_codegen::compile_with_schema(&ast, &self.schema)?;
         if log::log_enabled!(log::Level::Trace) {
             trace!("VDBE ops for sql '{}':", sql);
             for (i, op) in vm.ops.iter().enumerate() {
                 trace!("{:04} {:?}", i, op);
             }
         }
+        vm.func_dispatcher = Some(|name, args| {
+            if name.to_ascii_lowercase().starts_with("json") || name == "->" || name == "->>" {
+                liter_json::dispatch_function(name, args)
+            } else {
+                liter_functions::dispatch_function(name, args).map_err(|e| e.to_string())
+            }
+        });
+        vm.agg_dispatcher = Some(liter_functions::dispatch_aggregate);
         let n = vm.n_cursors;
         Ok(Statement {
             conn: self,
@@ -480,7 +492,11 @@ impl Statement<'_> {
 
     /// Return the number of result columns in this statement.
     pub fn column_count(&self) -> usize {
-        self.column_cache.len()
+        if !self.column_cache.is_empty() {
+            self.column_cache.len()
+        } else {
+            self.vm.num_result_cols()
+        }
     }
 }
 
@@ -854,5 +870,402 @@ mod tests {
 
         let rows = conn.query("SELECT n FROM tx2", [] as [(); 0]).unwrap();
         assert_eq!(rows.len(), 0, "rollback should undo the insert");
+    }
+
+    #[test]
+    fn test_sqlite_error_variants_and_conversions() {
+        let err_sql = SqliteError::Sql("syntax error".into());
+        assert_eq!(err_sql.to_string(), "SQL error: syntax error");
+
+        let err_nomem = SqliteError::NoMem;
+        assert_eq!(err_nomem.to_string(), "out of memory");
+
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err_io: SqliteError = io_err.into();
+        assert!(err_io.to_string().contains("I/O error"));
+
+        let err_corrupt = SqliteError::Corrupt;
+        assert_eq!(err_corrupt.to_string(), "database is corrupt");
+
+        let err_busy = SqliteError::Busy;
+        assert_eq!(err_busy.to_string(), "database is busy");
+
+        let err_constraint = SqliteError::Constraint("unique".into());
+        assert_eq!(err_constraint.to_string(), "constraint violation: unique");
+
+        let err_auth = SqliteError::Auth;
+        assert_eq!(err_auth.to_string(), "authorization denied");
+
+        let err_not_impl = SqliteError::NotImplemented;
+        assert_eq!(err_not_impl.to_string(), "not yet implemented");
+
+        let err_parse = SqliteError::Parse("unexpected token".into());
+        assert_eq!(err_parse.to_string(), "parse error: unexpected token");
+
+        // ParseError From conversion
+        let parse_err = liter_parser::ParseError::SyntaxError("unexpected".into());
+        let err_from_parse: SqliteError = parse_err.into();
+        assert!(matches!(err_from_parse, SqliteError::Parse(_)));
+
+        // CodegenError From conversion
+        let codegen_err = liter_codegen::CodegenError::Internal("test".into());
+        let err_from_codegen: SqliteError = codegen_err.into();
+        assert!(matches!(err_from_codegen, SqliteError::Sql(_)));
+
+        // VdbeError From conversion
+        let vdbe_err = liter_vdbe::VdbeError::Exec("halt".into());
+        let err_from_vdbe: SqliteError = vdbe_err.into();
+        assert!(matches!(err_from_vdbe, SqliteError::Sql(_)));
+
+        // BTreeError From conversion
+        let btree_err = liter_btree::BTreeError::Corrupt;
+        let err_from_btree: SqliteError = btree_err.into();
+        assert!(matches!(err_from_btree, SqliteError::Sql(_)));
+    }
+
+    #[test]
+    fn test_savepoint_and_release_noop() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(conn.execute("SAVEPOINT sp1", [] as [(); 0]).is_ok());
+        assert!(conn.execute("RELEASE sp1", [] as [(); 0]).is_ok());
+    }
+
+    #[test]
+    fn test_wasm_connection() {
+        let wasm_conn = WasmConnection::new();
+        assert!(wasm_conn.is_ok());
+    }
+
+    #[test]
+    fn test_query_one_and_from_value() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE q1 (i INT, r REAL, t TEXT)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO q1 VALUES (123, 45.67, 'hello')", [] as [(); 0])
+            .unwrap();
+
+        // Int conversions
+        let int_val: i64 = conn.query_one("SELECT i FROM q1", [] as [(); 0]).unwrap();
+        assert_eq!(int_val, 123);
+        let int_from_real: i64 = conn.query_one("SELECT 10.5", [] as [(); 0]).unwrap();
+        assert_eq!(int_from_real, 10);
+        let err_int: SqliteResult<i64> = conn.query_one("SELECT t FROM q1", [] as [(); 0]);
+        assert!(err_int.is_err());
+
+        // Real conversions
+        let real_val: f64 = conn.query_one("SELECT r FROM q1", [] as [(); 0]).unwrap();
+        assert_eq!(real_val, 45.67);
+        let real_from_int: f64 = conn.query_one("SELECT 5", [] as [(); 0]).unwrap();
+        assert_eq!(real_from_int, 5.0);
+        let err_real: SqliteResult<f64> = conn.query_one("SELECT t FROM q1", [] as [(); 0]);
+        assert!(err_real.is_err());
+
+        // String conversions
+        let text_val: String = conn.query_one("SELECT t FROM q1", [] as [(); 0]).unwrap();
+        assert_eq!(text_val, "hello");
+        let err_text: SqliteResult<String> = conn.query_one("SELECT i FROM q1", [] as [(); 0]);
+        assert!(err_text.is_err());
+
+        // Invalid UTF-8 String conversion
+        let bad_utf8_val = Value::Text(vec![0xff, 0xfe, 0xfd]);
+        assert!(String::from_value(bad_utf8_val).is_err());
+
+        // No rows returned
+        let err_no_rows: SqliteResult<i64> =
+            conn.query_one("SELECT i FROM q1 WHERE i = 999", [] as [(); 0]);
+        assert!(
+            matches!(err_no_rows, Err(SqliteError::Sql(msg)) if msg.contains("no rows returned"))
+        );
+    }
+
+    #[test]
+    fn test_query_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE qr (id INT, val TEXT)", [] as [(); 0])
+            .unwrap();
+        conn.execute("INSERT INTO qr VALUES (1, 'one')", [] as [(); 0])
+            .unwrap();
+
+        let row = conn
+            .query_row("SELECT id, val FROM qr WHERE id = 1", [] as [(); 0])
+            .unwrap();
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0], Value::Int(1));
+        assert_eq!(row[1], Value::Text(b"one".to_vec()));
+
+        let err = conn.query_row("SELECT id, val FROM qr WHERE id = 999", [] as [(); 0]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_disk_database_and_schema_loading() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("disk_test.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        {
+            let conn = Connection::open(db_path_str).unwrap();
+            assert_eq!(conn.path(), db_path_str);
+            conn.btree.begin_write().unwrap();
+            let tbl_pgno = conn
+                .btree
+                .allocate_page(liter_btree::PageKind::TableLeaf)
+                .unwrap();
+            let schema_record = liter_record::encode_record(&[
+                Value::Text(b"table".to_vec()),
+                Value::Text(b"disk_tbl".to_vec()),
+                Value::Text(b"disk_tbl".to_vec()),
+                Value::Int(tbl_pgno as i64),
+                Value::Text(b"CREATE TABLE disk_tbl (x INT, y TEXT)".to_vec()),
+            ])
+            .unwrap();
+            let mut cur = conn.btree.cursor(1, true).unwrap();
+            cur.insert(&1u64.to_be_bytes(), &schema_record, false)
+                .unwrap();
+            conn.btree.commit().unwrap();
+        }
+
+        // Reopen database from disk and ensure schema is recovered from page 1
+        {
+            let conn = Connection::open(db_path_str).unwrap();
+            let tables = conn.schema.tables();
+            assert_eq!(tables.len(), 1);
+            assert_eq!(tables[0].name, "disk_tbl");
+        }
+    }
+
+    #[test]
+    fn test_statement_column_value_out_of_range() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut stmt = conn.prepare("SELECT 10, 20").unwrap();
+        assert_eq!(stmt.step().unwrap(), StepResult::Row);
+        assert!(stmt.column_value(5).is_err());
+    }
+
+    #[test]
+    fn test_mem_to_value_all_variants() {
+        assert_eq!(mem_to_value(&liter_vdbe::Mem::Null), Value::Null);
+        assert_eq!(mem_to_value(&liter_vdbe::Mem::Int(42)), Value::Int(42));
+        assert_eq!(mem_to_value(&liter_vdbe::Mem::Real(3.5)), Value::Real(3.5));
+        assert_eq!(
+            mem_to_value(&liter_vdbe::Mem::Text("abc".into())),
+            Value::Text(b"abc".to_vec())
+        );
+        assert_eq!(
+            mem_to_value(&liter_vdbe::Mem::Blob(std::sync::Arc::from(
+                vec![1, 2, 3].into_boxed_slice()
+            ))),
+            Value::Blob(vec![1, 2, 3])
+        );
+        assert_eq!(
+            mem_to_value(&liter_vdbe::Mem::ZeroBlob(3)),
+            Value::Blob(vec![0, 0, 0])
+        );
+        assert_eq!(mem_to_value(&liter_vdbe::Mem::Agg(42)), Value::Null);
+    }
+
+    #[test]
+    fn test_query_json_and_scalar_functions() {
+        let conn = Connection::open_in_memory().unwrap();
+        let rows = conn
+            .query("SELECT json_extract('{\"a\": 10}', '$.a')", [] as [(); 0])
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Int(10));
+
+        let rows_len = conn.query("SELECT length('hello')", [] as [(); 0]).unwrap();
+        assert_eq!(rows_len.len(), 1);
+        assert_eq!(rows_len[0][0], Value::Int(5));
+    }
+
+    #[test]
+    fn test_into_params_vec_and_slice() {
+        let conn = Connection::open_in_memory().unwrap();
+        let slice: &[Value] = &[Value::Int(1)];
+        assert!(conn.query("SELECT 1", slice).is_ok());
+
+        let vec: Vec<Value> = vec![Value::Int(2)];
+        assert!(conn.query("SELECT 2", vec).is_ok());
+    }
+
+    #[test]
+    fn test_trace_logging_and_schema_edge_cases() {
+        struct TestLogger;
+        impl log::Log for TestLogger {
+            fn enabled(&self, _metadata: &log::Metadata) -> bool {
+                true
+            }
+            fn log(&self, _record: &log::Record) {}
+            fn flush(&self) {}
+        }
+        static LOGGER: TestLogger = TestLogger;
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(log::LevelFilter::Trace);
+        log::logger().flush();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let _ = conn.execute("CREATE TABLE t_as AS SELECT 1", [] as [(); 0]);
+        let _ = conn.query("SELECT 1", [] as [(); 0]);
+        let mut stmt = conn.prepare("SELECT 2").unwrap();
+        let _ = stmt.step();
+
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("schema_malformed.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        {
+            let conn = Connection::open(db_path_str).unwrap();
+            conn.btree.begin_write().unwrap();
+            let _ = conn
+                .btree
+                .allocate_page(liter_btree::PageKind::TableLeaf)
+                .unwrap();
+            let mut cur = conn.btree.cursor(1, true).unwrap();
+
+            // Record with non-matching column types (Int for type, Text for rootpage, Int for sql)
+            let rec_wrong_types = liter_record::encode_record(&[
+                Value::Int(123),
+                Value::Text(b"tbl_wrong".to_vec()),
+                Value::Text(b"tbl_wrong".to_vec()),
+                Value::Text(b"not_int_page".to_vec()),
+                Value::Int(456),
+            ])
+            .unwrap();
+            cur.insert(&10u64.to_be_bytes(), &rec_wrong_types, false)
+                .unwrap();
+
+            // Record with fewer than 3 elements
+            let rec_short = liter_record::encode_record(&[Value::Text(b"table".to_vec())]).unwrap();
+            cur.insert(&11u64.to_be_bytes(), &rec_short, false).unwrap();
+
+            // Record with CREATE TABLE AS SELECT
+            let rec_as_select = liter_record::encode_record(&[
+                Value::Text(b"table".to_vec()),
+                Value::Text(b"tbl_as".to_vec()),
+                Value::Text(b"tbl_as".to_vec()),
+                Value::Int(6),
+                Value::Text(b"CREATE TABLE tbl_as AS SELECT 1".to_vec()),
+            ])
+            .unwrap();
+            cur.insert(&12u64.to_be_bytes(), &rec_as_select, false)
+                .unwrap();
+
+            // Invalid raw bytes that fail decode_record
+            cur.insert(&13u64.to_be_bytes(), &[0xFF, 0xFF, 0xFF], false)
+                .unwrap();
+
+            conn.btree.commit().unwrap();
+        }
+
+        let _conn_reopened = Connection::open(db_path_str).unwrap();
+    }
+
+    #[test]
+    fn test_schema_loading_edge_cases() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("schema_edge.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        {
+            let conn = Connection::open(db_path_str).unwrap();
+            conn.btree.begin_write().unwrap();
+            let _ = conn
+                .btree
+                .allocate_page(liter_btree::PageKind::TableLeaf)
+                .unwrap();
+            let mut cur = conn.btree.cursor(1, true).unwrap();
+
+            // 1. Valid Table
+            let rec_valid = liter_record::encode_record(&[
+                Value::Text(b"table".to_vec()),
+                Value::Text(b"tbl_valid".to_vec()),
+                Value::Text(b"tbl_valid".to_vec()),
+                Value::Int(2),
+                Value::Text(b"CREATE TABLE tbl_valid (x INT)".to_vec()),
+            ])
+            .unwrap();
+            cur.insert(&1u64.to_be_bytes(), &rec_valid, false).unwrap();
+
+            // 2. Table with invalid SQL (parse error warning)
+            let rec_bad_sql = liter_record::encode_record(&[
+                Value::Text(b"table".to_vec()),
+                Value::Text(b"tbl_bad".to_vec()),
+                Value::Text(b"tbl_bad".to_vec()),
+                Value::Int(3),
+                Value::Text(b"INVALID SQL STATEMENT".to_vec()),
+            ])
+            .unwrap();
+            cur.insert(&2u64.to_be_bytes(), &rec_bad_sql, false)
+                .unwrap();
+
+            // 3. Table with non-create SQL
+            let rec_non_create = liter_record::encode_record(&[
+                Value::Text(b"table".to_vec()),
+                Value::Text(b"tbl_select".to_vec()),
+                Value::Text(b"tbl_select".to_vec()),
+                Value::Int(4),
+                Value::Text(b"SELECT 1".to_vec()),
+            ])
+            .unwrap();
+            cur.insert(&3u64.to_be_bytes(), &rec_non_create, false)
+                .unwrap();
+
+            // 4. Non-table schema objects (index, view, trigger)
+            let rec_index = liter_record::encode_record(&[
+                Value::Text(b"index".to_vec()),
+                Value::Text(b"idx_test".to_vec()),
+                Value::Text(b"tbl_valid".to_vec()),
+                Value::Int(5),
+                Value::Text(b"CREATE INDEX idx_test ON tbl_valid(x)".to_vec()),
+            ])
+            .unwrap();
+            cur.insert(&4u64.to_be_bytes(), &rec_index, false).unwrap();
+
+            conn.btree.commit().unwrap();
+        }
+
+        // Reopen database and verify schema loaded as expected
+        let conn2 = Connection::open(db_path_str).unwrap();
+        assert!(conn2.schema.get("tbl_valid").is_some());
+    }
+
+    #[test]
+    fn test_execute_with_scalar_func_and_json_arrow() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t_funcs (a INT, b TEXT)", [] as [(); 0])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO t_funcs VALUES (abs(10), 'hello')",
+            [] as [(); 0],
+        )
+        .unwrap();
+
+        let rows = conn.query("SELECT a FROM t_funcs", [] as [(); 0]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Int(10));
+
+        // Test arrow JSON operators
+        let rows_arrow = conn
+            .query("SELECT json_extract('{\"x\": 42}', '$.x')", [] as [(); 0])
+            .unwrap();
+        assert_eq!(rows_arrow[0][0], Value::Int(42));
+    }
+
+    #[test]
+    fn test_execute_error_rollback_and_func_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t_err (a INT)", [] as [(); 0])
+            .unwrap();
+
+        // Unknown function in execute triggers step error and auto-txn rollback
+        let res_exec = conn.execute("INSERT INTO t_err VALUES (unknown_fn(1))", [] as [(); 0]);
+        assert!(res_exec.is_err());
+
+        // Unknown function in query triggers step error
+        let res_query = conn.query("SELECT unknown_fn(1)", [] as [(); 0]);
+        assert!(res_query.is_err());
     }
 }

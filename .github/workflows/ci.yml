@@ -49,6 +49,66 @@ jobs:
     - name: Run Differential Tests
       run: cargo test -p differential
 
+  coverage:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Generate coverage (${{ matrix.os }})
+      run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov-${{ matrix.os }}.info
+
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v5
+      with:
+        name: lcov-${{ matrix.os }}
+        path: lcov-${{ matrix.os }}.info
+
+  coverage_report:
+    permissions:
+      contents: read
+    needs: coverage
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install lcov
+      run: sudo apt-get update && sudo apt-get install -y lcov
+
+    - name: Download coverage reports
+      uses: actions/download-artifact@v6
+      with:
+        pattern: lcov-*
+        merge-multiple: true
+
+    - name: Merge coverage reports
+      run: |
+        sed -i 's|\\|/|g' lcov-windows-latest.info
+        sed -i -E 's|^SF:.*crates/|SF:crates/|; s|^SF:.*tests/|SF:tests/|; s|^SF:.*tools/|SF:tools/|' lcov-ubuntu-latest.info lcov-windows-latest.info
+        lcov --add-tracefile lcov-ubuntu-latest.info \
+             --add-tracefile lcov-windows-latest.info \
+             --output-file lcov-merged.info
+        lcov --summary lcov-merged.info
+
+    - name: Upload merged coverage report
+      uses: actions/upload-artifact@v5
+      with:
+        name: lcov-merged
+        path: lcov-merged.info
+
   tcl_conformance_smoke:
     if: github.event_name != 'workflow_dispatch' || inputs.tcl_scope == 'smoke' || inputs.tcl_scope == 'all'
     runs-on: ubuntu-latest

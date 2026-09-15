@@ -109,4 +109,16 @@ mod tests {
         // Test apply
         assert_eq!(changeset.apply().unwrap(), 2);
     }
+
+    #[test]
+    fn test_session_enable_resumes_tracking() {
+        let mut session = Session::new("main");
+        session.disable();
+        session.record_change(ChangeOp::Insert, "users", 1);
+        assert_eq!(session.pending_changes.len(), 0);
+
+        session.enable();
+        session.record_change(ChangeOp::Insert, "users", 2);
+        assert_eq!(session.pending_changes.len(), 1);
+    }
 }

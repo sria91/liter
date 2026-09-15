@@ -214,4 +214,81 @@ mod tests {
         f.truncate(5).unwrap();
         assert_eq!(f.file_size().unwrap(), 5);
     }
+
+    #[test]
+    fn mem_store_new_len_is_empty() {
+        let store = MemStore::new();
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn read_past_end_of_file_returns_zero() {
+        let vfs = MemVfs::new();
+        let mut f = vfs.open(Path::new("f"), OpenFlags::READ_WRITE).unwrap();
+        f.write(b"hi", 0).unwrap();
+        let mut buf = [0u8; 4];
+        let n = f.read(&mut buf, 100).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn file_trait_methods() {
+        let vfs = MemVfs::new();
+        let mut f = vfs.open(Path::new("f"), OpenFlags::READ_WRITE).unwrap();
+
+        f.sync(SyncFlags::NORMAL).unwrap();
+
+        f.lock(LockLevel::Shared).unwrap();
+        assert_eq!(f.lock, LockLevel::Shared);
+        f.unlock(LockLevel::None).unwrap();
+        assert_eq!(f.lock, LockLevel::None);
+
+        assert!(!f.check_reserved_lock().unwrap());
+
+        let caps = f.device_characteristics();
+        assert!(caps.contains(DeviceCharacteristics::ATOMIC));
+        assert!(caps.contains(DeviceCharacteristics::SAFE_APPEND));
+        assert!(caps.contains(DeviceCharacteristics::SEQUENTIAL));
+
+        assert_eq!(f.sector_size(), 512);
+    }
+
+    #[test]
+    fn mem_vfs_default_impl() {
+        let vfs: MemVfs = Default::default();
+        assert!(
+            vfs.open(Path::new("f"), OpenFlags::READ_WRITE)
+                .unwrap()
+                .file_size()
+                .unwrap()
+                == 0
+        );
+    }
+
+    #[test]
+    fn vfs_trait_methods() {
+        let vfs = MemVfs::new();
+        let path = Path::new("some/file");
+
+        assert!(!vfs.access(path, AccessFlags::EXISTS).unwrap());
+        let _f = vfs.open(path, OpenFlags::READ_WRITE | OpenFlags::CREATE);
+        assert!(vfs.access(path, AccessFlags::EXISTS).unwrap());
+
+        assert_eq!(vfs.full_pathname(path).unwrap(), path.to_path_buf());
+
+        vfs.delete(path, false).unwrap();
+        assert!(!vfs.access(path, AccessFlags::EXISTS).unwrap());
+
+        let mut buf = [0u8; 8];
+        vfs.randomness(&mut buf);
+        assert_ne!(buf, [0u8; 8]);
+
+        vfs.sleep(0);
+
+        let t = vfs.current_time();
+        assert!(t > 0.0);
+
+        assert_eq!(vfs.name(), "memvfs");
+    }
 }

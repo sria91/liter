@@ -800,7 +800,7 @@ impl Pager {
             // committed (mx_frame is not advanced past the last commit).
             // We need to evict dirty pages from the cache so they are re-read
             // from the WAL on next access.
-            let dirty: Vec<PageNumber> = self.dirty_order.drain(..).collect();
+            let dirty: Vec<PageNumber> = std::mem::take(&mut self.dirty_order);
             for pgno in dirty {
                 self.cache.remove(&pgno);
             }
@@ -1388,5 +1388,679 @@ mod tests {
             b"SAFE",
             "journal recovery should restore pre-crash data"
         );
+    }
+
+    // ── WAL index internals ──────────────────────────────────────────────
+
+    #[test]
+    fn wal_find_latest_frame_scans_multiple_frames() {
+        let (mut pager, _f) = new_wal_pager();
+        pager.begin_write().unwrap();
+        for pgno in 1u32..=3 {
+            pager.write_access(pgno).unwrap()[0] = pgno as u8;
+        }
+        pager.commit().unwrap();
+        pager.cache.clear();
+
+        // Acquiring page 1 forces `find_latest_frame` to scan past the
+        // non-matching frames for pages 3 and 2 before it finds page 1.
+        assert_eq!(pager.acquire(1).unwrap()[0], 1);
+        assert_eq!(pager.acquire(2).unwrap()[0], 2);
+        assert_eq!(pager.acquire(3).unwrap()[0], 3);
+    }
+
+    #[test]
+    fn wal_lookup_miss_falls_back_to_db_file() {
+        let (mut pager, f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0..4].copy_from_slice(b"ONE1");
+        pager.write_access(2).unwrap()[0..4].copy_from_slice(b"TWO2");
+        pager.commit().unwrap();
+        drop(pager);
+
+        let mut pager = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        pager.enable_wal().unwrap();
+        // Rewrite page 1 via WAL; page 2 is left only in the main db file.
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0..4].copy_from_slice(b"ONEW");
+        pager.commit().unwrap();
+        pager.cache.clear();
+
+        // Page 2 has no WAL frame, so `find_latest_frame` returns `None` and
+        // the pager must fall back to reading it from the main db file.
+        assert_eq!(&pager.acquire(2).unwrap()[0..4], b"TWO2");
+        assert_eq!(&pager.acquire(1).unwrap()[0..4], b"ONEW");
+    }
+
+    #[test]
+    fn wal_reopen_replays_committed_frames() {
+        let f = NamedTempFile::new().unwrap();
+        {
+            let mut pager = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+            pager.enable_wal().unwrap();
+            pager.begin_write().unwrap();
+            pager.write_access(1).unwrap()[0..4].copy_from_slice(b"PER1");
+            pager.commit().unwrap();
+            pager.begin_write().unwrap();
+            pager.write_access(2).unwrap()[0..4].copy_from_slice(b"PER2");
+            pager.commit().unwrap();
+        } // Original pager (and its WAL file handle) dropped here.
+
+        let mut pager2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        pager2.enable_wal().unwrap();
+        assert_eq!(
+            pager2.db_size(),
+            2,
+            "enable_wal should sync db_size from the replayed WAL"
+        );
+        assert_eq!(&pager2.acquire(1).unwrap()[0..4], b"PER1");
+        assert_eq!(&pager2.acquire(2).unwrap()[0..4], b"PER2");
+    }
+
+    #[test]
+    fn wal_reopen_stops_replay_at_salt_mismatch() {
+        let f = NamedTempFile::new().unwrap();
+        let wal_file_path;
+        let corrupt_offset;
+        {
+            let mut pager = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+            pager.enable_wal().unwrap();
+            pager.begin_write().unwrap();
+            pager.write_access(1).unwrap()[0..4].copy_from_slice(b"GOOD");
+            pager.commit().unwrap();
+            pager.begin_write().unwrap();
+            pager.write_access(2).unwrap()[0..4].copy_from_slice(b"BAD!");
+            pager.commit().unwrap();
+
+            let wal = pager.wal.as_ref().unwrap();
+            wal_file_path = wal.path.clone();
+            // Offset of frame 2's salt-1 field (bytes 8..12 of its header).
+            corrupt_offset = wal.index.frame_hdr_offset(2) + 8;
+        }
+
+        // Corrupt frame 2's salt so it no longer matches the WAL header's salt.
+        let mut wal_file = OpenOptions::new().write(true).open(&wal_file_path).unwrap();
+        wal_file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        wal_file.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap();
+        wal_file.sync_all().unwrap();
+        drop(wal_file);
+
+        let mut pager2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        pager2.enable_wal().unwrap();
+        // Replay must have stopped after frame 1; frame 2 is invisible.
+        assert_eq!(pager2.wal.as_ref().unwrap().index.mx_frame, 1);
+        assert_eq!(&pager2.acquire(1).unwrap()[0..4], b"GOOD");
+    }
+
+    #[test]
+    fn wal_append_frames_pads_short_data() {
+        let (mut pager, _f) = new_wal_pager();
+        let ps = pager.page_size() as usize;
+        let wal = pager.wal.as_mut().unwrap();
+        let short = vec![0xAB, 0xCD, 0xEF];
+        wal.append_frames(&[(1, short.clone())], 1).unwrap();
+        let data = wal.read_frame_data(1).unwrap();
+        assert_eq!(data.len(), ps);
+        assert_eq!(&data[0..3], &short[..]);
+        assert!(
+            data[3..].iter().all(|&b| b == 0),
+            "tail must be zero-padded"
+        );
+    }
+
+    #[test]
+    fn checkpoint_with_no_commits_is_noop() {
+        let (mut pager, _f) = new_wal_pager();
+        assert_eq!(pager.checkpoint(CheckpointMode::Passive).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn checkpoint_skips_uncommitted_trailing_frames() {
+        let (mut pager, f) = new_wal_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 0x22;
+        pager.commit().unwrap();
+
+        // Simulate a WAL that has extra, never-committed frames appended
+        // after the last real commit (e.g. a writer that crashed mid-write).
+        // `last_commit_frame` must walk backward past them.
+        {
+            let wal = pager.wal.as_mut().unwrap();
+            wal.index.frames.push(WalFrameMeta {
+                pgno: 2,
+                db_size: 0,
+            });
+            wal.index.frames.push(WalFrameMeta {
+                pgno: 2,
+                db_size: 0,
+            });
+            wal.index.mx_frame = 3;
+        }
+
+        let (total, copied) = pager.checkpoint(CheckpointMode::Passive).unwrap();
+        assert_eq!(
+            total, 1,
+            "only the real commit frame should be checkpointed"
+        );
+        assert_eq!(copied, 1);
+
+        let mut p2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        assert_eq!(p2.acquire(1).unwrap()[0], 0x22);
+    }
+
+    #[test]
+    fn wal_open_reinitializes_when_existing_file_has_wrong_magic() {
+        let db = NamedTempFile::new().unwrap();
+        let existing_wal = wal_path(db.path());
+        // Long enough to pass the header-size check, but not a valid WAL magic.
+        std::fs::write(&existing_wal, vec![0u8; 40]).unwrap();
+
+        let mut pager = Pager::open(db.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        pager.enable_wal().unwrap();
+        assert!(pager.is_wal_mode());
+
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0..4].copy_from_slice(b"FRSH");
+        pager.commit().unwrap();
+        pager.cache.clear();
+        assert_eq!(&pager.acquire(1).unwrap()[0..4], b"FRSH");
+    }
+
+    #[test]
+    fn checkpoint_skips_frames_with_pgno_zero() {
+        let (mut pager, f) = new_wal_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 0x11;
+        pager.commit().unwrap();
+
+        // Inject a corrupt "commit" frame with pgno == 0 as the new latest frame.
+        {
+            let wal = pager.wal.as_mut().unwrap();
+            wal.index.frames.push(WalFrameMeta {
+                pgno: 0,
+                db_size: 1,
+            });
+            wal.index.mx_frame = 2;
+        }
+
+        let (total, copied) = pager.checkpoint(CheckpointMode::Passive).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(copied, 1, "the pgno==0 frame must be skipped");
+
+        let mut p2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        assert_eq!(p2.acquire(1).unwrap()[0], 0x11);
+    }
+
+    // ── Pager::open header parsing ───────────────────────────────────────
+
+    #[test]
+    fn open_rejects_invalid_default_page_size() {
+        let f = NamedTempFile::new().unwrap();
+        assert!(matches!(
+            Pager::open(f.path(), 1000, false),
+            Err(PagerError::Corrupt)
+        ));
+        assert!(matches!(
+            Pager::open(f.path(), 256, false),
+            Err(PagerError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn open_readonly_missing_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.db");
+        assert!(Pager::open(&path, DEFAULT_PAGE_SIZE, true).is_err());
+    }
+
+    #[test]
+    fn open_reads_page_size_and_autocalculates_db_size() {
+        let f = NamedTempFile::new().unwrap();
+        let mut buf = vec![0u8; 512 * 3];
+        buf[0..16].copy_from_slice(DB_MAGIC);
+        buf[16..18].copy_from_slice(&512u16.to_be_bytes());
+        // ndb left as 0 -> the pager must derive it from file_size / page_size.
+        std::fs::write(f.path(), &buf).unwrap();
+
+        let pager = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        assert_eq!(pager.page_size(), 512);
+        assert_eq!(pager.db_size(), 3);
+    }
+
+    #[test]
+    fn open_maps_page_size_raw_one_to_32768() {
+        let f = NamedTempFile::new().unwrap();
+        let mut buf = vec![0u8; 100];
+        buf[0..16].copy_from_slice(DB_MAGIC);
+        buf[16..18].copy_from_slice(&1u16.to_be_bytes());
+        buf[28..32].copy_from_slice(&1u32.to_be_bytes());
+        std::fs::write(f.path(), &buf).unwrap();
+
+        let pager = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        assert_eq!(pager.page_size(), 32768);
+        assert_eq!(pager.db_size(), 1);
+    }
+
+    #[test]
+    fn open_without_magic_falls_back_to_default_page_size() {
+        let f = NamedTempFile::new().unwrap();
+        let buf = vec![0u8; 200]; // no SQLite magic present
+        std::fs::write(f.path(), &buf).unwrap();
+
+        let pager = Pager::open(f.path(), 512, false).unwrap();
+        assert_eq!(pager.page_size(), 512);
+        assert_eq!(pager.db_size(), 1); // (200 / 512) = 0, clamped to 1
+    }
+
+    #[test]
+    fn open_with_partial_header_treats_as_one_page() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), vec![0u8; 40]).unwrap();
+
+        let pager = Pager::open(f.path(), 512, false).unwrap();
+        assert_eq!(pager.page_size(), 512);
+        assert_eq!(pager.db_size(), 1);
+    }
+
+    // ── Accessors & simple validation ────────────────────────────────────
+
+    #[test]
+    fn accessors_report_expected_state() {
+        let (mut pager, f) = new_pager();
+        assert_eq!(pager.page_size(), DEFAULT_PAGE_SIZE);
+        assert_eq!(pager.state(), PagerState::Unlocked);
+        assert_eq!(pager.path(), f.path());
+        assert!(!pager.is_read_only());
+        assert!(!pager.is_wal_mode());
+        pager.set_cache_size(7);
+        assert_eq!(pager.cache_size, 7);
+        pager.begin_write().unwrap();
+        assert_eq!(pager.state(), PagerState::Writer);
+    }
+
+    #[test]
+    fn set_page_size_validates_and_updates() {
+        let (mut pager, _f) = new_pager();
+        pager.set_page_size(8192).unwrap();
+        assert_eq!(pager.page_size(), 8192);
+
+        // Not a power of two / below the minimum.
+        assert!(pager.set_page_size(3000).is_err());
+
+        // Once the database has pages, the page size is locked.
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap();
+        pager.commit().unwrap();
+        assert!(pager.set_page_size(4096).is_err());
+    }
+
+    #[test]
+    fn enable_wal_errors_on_readonly_and_is_idempotent() {
+        let f = NamedTempFile::new().unwrap();
+        {
+            Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        }
+        let mut ro = Pager::open(f.path(), DEFAULT_PAGE_SIZE, true).unwrap();
+        assert!(matches!(ro.enable_wal(), Err(PagerError::ReadOnly)));
+
+        let (mut pager, _f2) = new_wal_pager();
+        assert!(pager.is_wal_mode());
+        pager.enable_wal().unwrap(); // second call is a no-op
+        assert!(pager.is_wal_mode());
+    }
+
+    #[test]
+    fn acquire_rejects_page_zero() {
+        let (mut pager, _f) = new_pager();
+        assert!(matches!(
+            pager.acquire(0),
+            Err(PagerError::PageOutOfRange(0))
+        ));
+    }
+
+    #[test]
+    fn lookup_returns_cached_page_or_none() {
+        let (mut pager, _f) = new_pager();
+        assert!(pager.lookup(1).is_none());
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 42;
+        assert_eq!(pager.lookup(1).unwrap()[0], 42);
+    }
+
+    #[test]
+    fn write_access_errors_outside_transaction_and_on_page_zero() {
+        let (mut pager, _f) = new_pager();
+        assert!(matches!(
+            pager.write_access(1),
+            Err(PagerError::NotInTransaction)
+        ));
+        pager.begin_write().unwrap();
+        assert!(matches!(
+            pager.write_access(0),
+            Err(PagerError::PageOutOfRange(0))
+        ));
+    }
+
+    #[test]
+    fn begin_write_errors_on_readonly_pager() {
+        let f = NamedTempFile::new().unwrap();
+        {
+            Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        }
+        let mut ro = Pager::open(f.path(), DEFAULT_PAGE_SIZE, true).unwrap();
+        assert!(matches!(ro.begin_write(), Err(PagerError::ReadOnly)));
+    }
+
+    #[test]
+    fn commit_phase_one_errors_outside_transaction() {
+        let (mut pager, _f) = new_pager();
+        assert!(matches!(
+            pager.commit_phase_one(None),
+            Err(PagerError::NotInTransaction)
+        ));
+    }
+
+    #[test]
+    fn rollback_errors_outside_transaction() {
+        let (mut pager, _f) = new_pager();
+        assert!(matches!(
+            pager.rollback(),
+            Err(PagerError::NotInTransaction)
+        ));
+    }
+
+    // ── Savepoints ────────────────────────────────────────────────────────
+
+    #[test]
+    fn savepoint_rollback_rejects_invalid_index() {
+        let (mut pager, _f) = new_pager();
+        pager.begin_write().unwrap();
+        assert!(matches!(
+            pager.savepoint_rollback(0),
+            Err(PagerError::PageOutOfRange(0))
+        ));
+    }
+
+    #[test]
+    fn savepoint_rollback_discards_pages_added_after_savepoint() {
+        let (mut pager, _f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 1;
+        pager.open_savepoint(0).unwrap();
+        // Page 2 didn't exist at savepoint-open time.
+        pager.write_access(2).unwrap()[0] = 2;
+        assert_eq!(pager.db_size(), 2);
+
+        pager.savepoint_rollback(0).unwrap();
+
+        assert_eq!(
+            pager.db_size(),
+            1,
+            "db_size should revert to its savepoint-open value"
+        );
+        assert!(
+            pager.lookup(2).is_none(),
+            "page 2 should be evicted from the cache"
+        );
+    }
+
+    #[test]
+    fn savepoint_release_merges_into_enclosing_transaction() {
+        let (mut pager, _f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 1;
+        pager.open_savepoint(0).unwrap();
+        pager.write_access(1).unwrap()[0] = 2;
+        pager.open_savepoint(1).unwrap();
+        pager.write_access(1).unwrap()[0] = 3;
+
+        // Releasing savepoint 0 drops both savepoints without touching data.
+        pager.savepoint_release(0).unwrap();
+        assert!(pager.savepoints.is_empty());
+        assert_eq!(pager.acquire(1).unwrap()[0], 3);
+    }
+
+    // ── Checkpoint / move_page edge cases ────────────────────────────────
+
+    #[test]
+    fn checkpoint_without_wal_is_noop() {
+        let (mut pager, _f) = new_pager();
+        assert_eq!(pager.checkpoint(CheckpointMode::Full).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn move_page_errors_outside_transaction_and_on_target_zero() {
+        let (mut pager, _f) = new_pager();
+        let page: PageRef = Arc::new(vec![0u8; DEFAULT_PAGE_SIZE as usize]);
+        assert!(matches!(
+            pager.move_page(page.clone(), 1),
+            Err(PagerError::NotInTransaction)
+        ));
+        pager.begin_write().unwrap();
+        assert!(matches!(
+            pager.move_page(page, 0),
+            Err(PagerError::PageOutOfRange(0))
+        ));
+    }
+
+    // ── Cache eviction ────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_evicts_clean_pages_beyond_cache_size_disk_mode() {
+        let (mut pager, _f) = new_pager();
+        pager.begin_write().unwrap();
+        for pgno in 1u32..=5 {
+            pager.write_access(pgno).unwrap()[0] = pgno as u8;
+        }
+        pager.commit().unwrap();
+        pager.cache.clear();
+        pager.set_cache_size(2);
+
+        for pgno in 1u32..=5 {
+            pager.acquire(pgno).unwrap();
+        }
+        assert_eq!(
+            pager.cache.len(),
+            2,
+            "cache should settle back at cache_size after eviction"
+        );
+    }
+
+    #[test]
+    fn cache_evicts_clean_pages_beyond_cache_size_wal_mode() {
+        let (mut pager, _f) = new_wal_pager();
+        pager.begin_write().unwrap();
+        for pgno in 1u32..=5 {
+            pager.write_access(pgno).unwrap()[0] = pgno as u8;
+        }
+        pager.commit().unwrap();
+        pager.cache.clear();
+        pager.set_cache_size(2);
+
+        for pgno in 1u32..=5 {
+            pager.acquire(pgno).unwrap();
+        }
+        assert_eq!(
+            pager.cache.len(),
+            2,
+            "cache should settle back at cache_size after eviction"
+        );
+    }
+
+    #[test]
+    fn evict_clean_leaves_cache_oversized_when_all_other_pages_are_dirty() {
+        let (mut pager, _f) = new_wal_pager();
+
+        // Commit two pages so page 2 can later be re-read from the WAL.
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 1;
+        pager.write_access(2).unwrap()[0] = 2;
+        pager.commit().unwrap();
+        pager.cache.clear();
+
+        pager.set_cache_size(1);
+        pager.begin_write().unwrap();
+        // Dirty two pages so neither is a candidate for eviction.
+        pager.write_access(1).unwrap()[0] = 11;
+        pager.write_access(3).unwrap()[0] = 33; // new page, also dirty
+        assert_eq!(pager.cache.len(), 2);
+
+        // Reading page 2 (clean, from the WAL) inserts a 3rd cache entry;
+        // eviction can't find any clean *other* page, so the cache grows
+        // past cache_size instead of panicking or corrupting state.
+        pager.acquire(2).unwrap();
+        assert_eq!(pager.cache.len(), 3, "no clean page was available to evict");
+    }
+
+    // ── ensure_cached edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn acquire_errors_when_page_exceeds_db_size() {
+        let (mut pager, _f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap();
+        pager.commit().unwrap();
+
+        assert!(matches!(
+            pager.acquire(5),
+            Err(PagerError::PageOutOfRange(5))
+        ));
+    }
+
+    #[test]
+    fn acquire_on_empty_db_returns_zeroed_page() {
+        let (mut pager, _f) = new_pager();
+        let page = pager.acquire(1).unwrap();
+        assert!(page.iter().all(|&b| b == 0));
+        assert_eq!(page.len(), DEFAULT_PAGE_SIZE as usize);
+    }
+
+    #[test]
+    fn acquire_propagates_io_error_when_file_shorter_than_expected() {
+        let (mut pager, f) = new_pager();
+        pager.begin_write().unwrap();
+        for pgno in 1u32..=3 {
+            pager.write_access(pgno).unwrap()[0] = pgno as u8;
+        }
+        pager.commit().unwrap();
+        pager.cache.clear();
+
+        // Truncate the underlying file so page 3's bytes no longer exist,
+        // while the pager still believes db_size == 3.
+        let file = OpenOptions::new().write(true).open(f.path()).unwrap();
+        file.set_len(DEFAULT_PAGE_SIZE as u64).unwrap(); // keep only page 1
+        file.sync_all().unwrap();
+        drop(file);
+
+        match pager.acquire(3) {
+            Err(PagerError::Io(_)) => {}
+            other => panic!("expected an I/O error, got {other:?}"),
+        }
+    }
+
+    // ── Defensive fallbacks (inconsistent internal state) ────────────────
+
+    #[test]
+    fn write_access_tolerates_missing_journal_defensively() {
+        let (mut pager, _f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.journal = None; // simulate an inconsistent internal state
+        let buf = pager.write_access(1).unwrap();
+        buf[0..4].copy_from_slice(b"NOJN");
+        assert_eq!(&pager.cache[&1].data[0..4], b"NOJN");
+        assert!(pager.cache[&1].dirty);
+    }
+
+    #[test]
+    fn commit_phase_one_tolerates_missing_journal_defensively() {
+        let (mut pager, f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0..4].copy_from_slice(b"NOJ2");
+        pager.journal = None; // simulate an inconsistent internal state
+        pager.commit_phase_one(None).unwrap();
+        assert_eq!(pager.state(), PagerState::WriterLocked);
+        pager.commit_phase_two().unwrap();
+
+        let mut p2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        assert_eq!(&p2.acquire(1).unwrap()[0..4], b"NOJ2");
+    }
+
+    #[test]
+    fn commit_journal_mode_skips_dirty_order_entries_that_are_not_dirty() {
+        let (mut pager, f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 1;
+        pager.write_access(2).unwrap()[0] = 2;
+        // Simulate an inconsistent internal state: page 2 is still listed in
+        // dirty_order, but its cache entry no longer reports itself dirty.
+        pager.cache.get_mut(&2).unwrap().dirty = false;
+        pager.commit().unwrap();
+
+        let mut p2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        assert_eq!(p2.acquire(1).unwrap()[0], 1);
+        // Page 2 was skipped by commit, so the file was never extended to
+        // cover it and re-opening only sees a 1-page database.
+        assert_eq!(p2.db_size(), 1);
+        assert!(p2.acquire(2).is_err());
+    }
+
+    #[test]
+    fn commit_wal_mode_skips_dirty_order_entries_that_are_not_dirty() {
+        let (mut pager, _f) = new_wal_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 1;
+        pager.write_access(2).unwrap()[0] = 2;
+        pager.cache.get_mut(&2).unwrap().dirty = false;
+        pager.commit().unwrap();
+        pager.cache.clear();
+
+        assert_eq!(pager.acquire(1).unwrap()[0], 1);
+        // Page 2's frame was never appended to the WAL and the main db file
+        // has no data for it either, so reading it must error rather than
+        // silently returning bogus data or panicking.
+        assert!(pager.acquire(2).is_err());
+    }
+
+    #[test]
+    fn rollback_tolerates_missing_journal_defensively() {
+        let (mut pager, _f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 9;
+        pager.journal = None; // simulate an inconsistent internal state
+        pager.rollback().unwrap();
+        assert_eq!(pager.state(), PagerState::Reader);
+        assert_eq!(pager.db_size(), 0);
+    }
+
+    // ── Database header maintenance ───────────────────────────────────────
+
+    #[test]
+    fn commit_with_no_writes_skips_header_update() {
+        let (mut pager, _f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.commit().unwrap();
+        assert_eq!(pager.db_size(), 0);
+        assert_eq!(pager.state(), PagerState::Reader);
+    }
+
+    #[test]
+    fn commit_updates_sqlite_header_change_counter_and_size() {
+        let (mut pager, f) = new_pager();
+        pager.begin_write().unwrap();
+        {
+            let page1 = pager.write_access(1).unwrap();
+            page1[0..16].copy_from_slice(DB_MAGIC);
+            // Page size field (bytes 16..18), so re-opening the file parses
+            // the header correctly instead of defaulting to page_size == 0.
+            page1[16..18].copy_from_slice(&DEFAULT_PAGE_SIZE.to_be_bytes());
+        }
+        pager.commit().unwrap();
+
+        let mut p2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        let page1 = p2.acquire(1).unwrap();
+        let change_counter = u32::from_be_bytes(page1[24..28].try_into().unwrap());
+        let db_size_in_header = u32::from_be_bytes(page1[28..32].try_into().unwrap());
+        assert_eq!(change_counter, 1);
+        assert_eq!(db_size_in_header, 1);
     }
 }

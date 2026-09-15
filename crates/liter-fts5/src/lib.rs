@@ -136,6 +136,25 @@ mod tests {
     }
 
     #[test]
+    fn test_ascii_tokenizer_trailing_token() {
+        let t = AsciiTokenizer;
+        let tokens = t.tokenize("Hello World");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1].text, "world");
+        assert_eq!(tokens[1].end_offset, "Hello World".len());
+    }
+
+    #[test]
+    fn test_fts5_table_new() {
+        let table = Fts5Table::new("docs");
+        assert_eq!(table.name, "docs");
+        assert_eq!(
+            table.tokenizer.tokenize("hi"),
+            AsciiTokenizer.tokenize("hi")
+        );
+    }
+
+    #[test]
     fn test_bm25_score() {
         let score = bm25_score(3.0, 100.0, 150.0, 1000.0, 50.0);
         assert!(score > 0.0); // should be a positive score

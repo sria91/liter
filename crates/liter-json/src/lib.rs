@@ -22,7 +22,7 @@ pub fn dispatch_function(name: &str, args: &[Mem]) -> Result<Mem, String> {
         "json_valid" => func_json_valid(args).map_err(|e| e.to_string()),
         "json_extract" | "->>" | "->" => func_json_extract(args).map_err(|e| e.to_string()),
         "json_object" => func_json_object(args).map_err(|e| e.to_string()),
-        "json_array" => func_json_array(args).map_err(|e| e.to_string()),
+        "json_array" => Ok(func_json_array(args)),
         _ => Err(format!("Not implemented: {}", name)),
     }
 }
@@ -116,15 +116,10 @@ pub fn func_json_extract(args: &[Mem]) -> Result<Mem, JsonError> {
         match val {
             JsonValue::Null => Ok(Mem::Null),
             JsonValue::Bool(b) => Ok(Mem::Int(if b { 1 } else { 0 })),
-            JsonValue::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Ok(Mem::Int(i))
-                } else if let Some(f) = n.as_f64() {
-                    Ok(Mem::Real(f))
-                } else {
-                    Ok(Mem::Null)
-                }
-            }
+            JsonValue::Number(n) => match n.as_i64() {
+                Some(i) => Ok(Mem::Int(i)),
+                None => Ok(Mem::Real(n.as_f64().unwrap_or(0.0))),
+            },
             JsonValue::String(s) => Ok(Mem::Text(Arc::from(s.as_str()))),
             JsonValue::Array(_) | JsonValue::Object(_) => {
                 Ok(Mem::Text(Arc::from(val.to_string().as_str())))
@@ -157,13 +152,13 @@ pub fn func_json_object(args: &[Mem]) -> Result<Mem, JsonError> {
     Ok(Mem::Text(Arc::from(obj.to_string().as_str())))
 }
 
-pub fn func_json_array(args: &[Mem]) -> Result<Mem, JsonError> {
+pub fn func_json_array(args: &[Mem]) -> Mem {
     let mut vec = Vec::new();
     for arg in args {
         vec.push(mem_to_json(arg));
     }
     let arr = JsonValue::Array(vec);
-    Ok(Mem::Text(Arc::from(arr.to_string().as_str())))
+    Mem::Text(Arc::from(arr.to_string().as_str()))
 }
 
 #[cfg(test)]
@@ -210,8 +205,213 @@ mod tests {
         let val2 = Mem::Text(Arc::from("hello"));
         let val3 = Mem::Null;
         assert_eq!(
-            func_json_array(&[val1, val2, val3]).unwrap(),
+            func_json_array(&[val1, val2, val3]),
             Mem::Text(Arc::from("[1,\"hello\",null]"))
+        );
+    }
+
+    #[test]
+    fn test_dispatch_function_all_branches() {
+        let valid_args = [Mem::Text(Arc::from("1"))];
+        assert!(dispatch_function("JSON_VALID", &valid_args).is_ok());
+
+        let extract_args = [
+            Mem::Text(Arc::from("{\"a\":1}")),
+            Mem::Text(Arc::from("$.a")),
+        ];
+        assert!(dispatch_function("json_extract", &extract_args).is_ok());
+        assert!(dispatch_function("->>", &extract_args).is_ok());
+        assert!(dispatch_function("->", &extract_args).is_ok());
+
+        let object_args = [Mem::Text(Arc::from("k")), Mem::Int(1)];
+        assert!(dispatch_function("json_object", &object_args).is_ok());
+
+        assert!(dispatch_function("json_array", &[Mem::Int(1)]).is_ok());
+
+        assert!(dispatch_function("json_unknown_fn", &[]).is_err());
+    }
+
+    #[test]
+    fn test_json_error_debug() {
+        let err = JsonError::WrongArgCount("test".into());
+        assert_eq!(format!("{err:?}"), "WrongArgCount(\"test\")");
+        assert_eq!(
+            format!("{err}"),
+            "wrong number of arguments to function test()"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_function_propagates_errors_as_strings() {
+        let err = dispatch_function("json_valid", &[]).unwrap_err();
+        assert!(err.contains("json_valid"));
+
+        let err2 = dispatch_function("json_extract", &[]).unwrap_err();
+        assert!(err2.contains("json_extract"));
+
+        let err2_arrow = dispatch_function("->>", &[]).unwrap_err();
+        assert!(err2_arrow.contains("json_extract"));
+
+        let err2_single_arrow = dispatch_function("->", &[]).unwrap_err();
+        assert!(err2_single_arrow.contains("json_extract"));
+
+        let err3 = dispatch_function("json_object", &[Mem::Null, Mem::Int(1)]).unwrap_err();
+        assert!(err3.contains("json_object"));
+    }
+
+    #[test]
+    fn test_mem_to_string_all_branches() {
+        assert_eq!(mem_to_string(&Mem::Text(Arc::from("x"))), "x");
+        assert_eq!(mem_to_string(&Mem::Int(7)), "7");
+        assert_eq!(mem_to_string(&Mem::Real(1.5)), "1.5");
+        assert_eq!(mem_to_string(&Mem::Null), "");
+        assert_eq!(mem_to_string(&Mem::Blob(Arc::from(b"x".as_slice()))), "");
+    }
+
+    #[test]
+    fn test_mem_to_string_non_text_key_in_json_object() {
+        // Non-text, non-null keys go through `mem_to_string` (int/real branches).
+        let args = [
+            Mem::Int(1),
+            Mem::Text(Arc::from("a")),
+            Mem::Real(2.5),
+            Mem::Text(Arc::from("b")),
+        ];
+        let result = func_json_object(&args).unwrap();
+        assert_eq!(result, Mem::Text(Arc::from("{\"1\":\"a\",\"2.5\":\"b\"}")));
+    }
+
+    #[test]
+    fn test_mem_to_json_real_and_blob_and_other() {
+        let args = [
+            Mem::Real(3.5),
+            Mem::Blob(Arc::from(b"hi".as_slice())),
+            Mem::Text(Arc::from("42")), // parses as JSON number
+            Mem::ZeroBlob(4),           // falls into the catch-all -> JsonValue::Null
+        ];
+        let result = func_json_array(&args);
+        assert_eq!(result, Mem::Text(Arc::from("[3.5,\"hi\",42,null]")));
+    }
+
+    #[test]
+    fn test_json_extract_result_variants() {
+        let json = Mem::Text(Arc::from(
+            "{\"n\": null, \"t\": true, \"false_val\": false, \"f\": 1.5, \"s\": \"hi\", \"o\": {\"x\": 1}, \"arr\": [1, 2]}",
+        ));
+
+        assert_eq!(
+            func_json_extract(&[json.clone(), Mem::Text(Arc::from("$.n"))]).unwrap(),
+            Mem::Null
+        );
+        assert_eq!(
+            func_json_extract(&[json.clone(), Mem::Text(Arc::from("$.t"))]).unwrap(),
+            Mem::Int(1)
+        );
+        assert_eq!(
+            func_json_extract(&[json.clone(), Mem::Text(Arc::from("$.false_val"))]).unwrap(),
+            Mem::Int(0)
+        );
+        assert_eq!(
+            func_json_extract(&[json.clone(), Mem::Text(Arc::from("$.f"))]).unwrap(),
+            Mem::Real(1.5)
+        );
+        assert_eq!(
+            func_json_extract(&[json.clone(), Mem::Text(Arc::from("$.s"))]).unwrap(),
+            Mem::Text(Arc::from("hi"))
+        );
+        assert_eq!(
+            func_json_extract(&[json.clone(), Mem::Text(Arc::from("$.o"))]).unwrap(),
+            Mem::Text(Arc::from("{\"x\":1}"))
+        );
+        assert_eq!(
+            func_json_extract(&[json, Mem::Text(Arc::from("$.arr"))]).unwrap(),
+            Mem::Text(Arc::from("[1,2]"))
+        );
+    }
+
+    #[test]
+    fn test_json_valid_empty_args_errors() {
+        let err = func_json_valid(&[]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "wrong number of arguments to function json_valid()"
+        );
+    }
+
+    #[test]
+    fn test_json_valid_null_and_other_types() {
+        assert_eq!(func_json_valid(&[Mem::Null]).unwrap(), Mem::Null);
+        assert_eq!(func_json_valid(&[Mem::Int(5)]).unwrap(), Mem::Int(0));
+    }
+
+    #[test]
+    fn test_json_extract_wrong_arg_count() {
+        let json = Mem::Text(Arc::from("{}"));
+        let err = func_json_extract(&[json]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "wrong number of arguments to function json_extract()"
+        );
+    }
+
+    #[test]
+    fn test_json_extract_null_and_non_text_first_arg() {
+        let path = Mem::Text(Arc::from("$.a"));
+        assert_eq!(
+            func_json_extract(&[Mem::Null, path.clone()]).unwrap(),
+            Mem::Null
+        );
+        assert_eq!(func_json_extract(&[Mem::Int(1), path]).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn test_json_extract_non_text_path() {
+        let json = Mem::Text(Arc::from("{\"a\":1}"));
+        assert_eq!(func_json_extract(&[json, Mem::Int(1)]).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn test_json_extract_invalid_json_returns_null() {
+        let json = Mem::Text(Arc::from("not json"));
+        let path = Mem::Text(Arc::from("$.a"));
+        assert_eq!(func_json_extract(&[json, path]).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn test_json_extract_array_out_of_range_and_non_numeric_index() {
+        let json = Mem::Text(Arc::from("{\"c\": [1, 2]}"));
+        let out_of_range = Mem::Text(Arc::from("$.c.10"));
+        assert_eq!(
+            func_json_extract(&[json.clone(), out_of_range]).unwrap(),
+            Mem::Null
+        );
+        let non_numeric = Mem::Text(Arc::from("$.c.foo"));
+        assert_eq!(func_json_extract(&[json, non_numeric]).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn test_json_extract_path_into_scalar_returns_null() {
+        // "a" resolves to a number; indexing further into it hits the catch-all.
+        let json = Mem::Text(Arc::from("{\"a\": 42}"));
+        let path = Mem::Text(Arc::from("$.a.b"));
+        assert_eq!(func_json_extract(&[json, path]).unwrap(), Mem::Null);
+    }
+
+    #[test]
+    fn test_json_object_odd_args_errors() {
+        let err = func_json_object(&[Mem::Text(Arc::from("a"))]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "wrong number of arguments to function json_object()"
+        );
+    }
+
+    #[test]
+    fn test_json_object_null_key_errors() {
+        let err = func_json_object(&[Mem::Null, Mem::Int(1)]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "wrong number of arguments to function json_object label cannot be null()"
         );
     }
 }

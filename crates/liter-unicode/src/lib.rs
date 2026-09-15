@@ -57,8 +57,10 @@ pub fn utf16le_to_string(bytes: &[u8]) -> Result<String, UnicodeError> {
         return Err(UnicodeError::InvalidUtf16);
     }
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     String::from_utf16(&units).map_err(|_| UnicodeError::InvalidUtf16)
 }
@@ -102,5 +104,38 @@ mod tests {
         use std::cmp::Ordering;
         assert_eq!(str_icmp("ABC", "abc"), Ordering::Equal);
         assert_eq!(str_icmp("abc", "abd"), Ordering::Less);
+    }
+
+    #[test]
+    fn encode_utf16le_bmp_char() {
+        let mut buf = [0u8; 4];
+        let n = encode_utf16le('A', &mut buf).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(&buf[..2], &[0x41, 0x00]);
+    }
+
+    #[test]
+    fn encode_utf16le_surrogate_pair() {
+        // U+1F600 requires a UTF-16 surrogate pair (4 bytes).
+        let mut buf = [0u8; 4];
+        let n = encode_utf16le('\u{1F600}', &mut buf).unwrap();
+        assert_eq!(n, 4);
+    }
+
+    #[test]
+    fn encode_utf16le_buffer_too_small() {
+        let mut buf = [0u8; 1];
+        assert!(matches!(
+            encode_utf16le('A', &mut buf),
+            Err(UnicodeError::BufferTooSmall)
+        ));
+    }
+
+    #[test]
+    fn utf16le_to_string_odd_length_errors() {
+        assert!(matches!(
+            utf16le_to_string(&[0x41]),
+            Err(UnicodeError::InvalidUtf16)
+        ));
     }
 }

@@ -84,27 +84,31 @@ impl VfsFile for UnixFile {
         {
             use std::os::unix::io::AsRawFd;
             let fd = self.file.as_raw_fd();
-            match level {
-                LockLevel::Shared => {
-                    // Read lock on a random byte in the shared range.
-                    fcntl_lock(fd, libc::F_RDLCK, SHARED_FIRST, 1)?;
-                }
-                LockLevel::Reserved => {
-                    // Write lock on the reserved byte.
-                    fcntl_lock(fd, libc::F_WRLCK, RESERVED_BYTE, 1)?;
-                }
-                LockLevel::Pending => {
-                    // Write lock on the pending byte.
-                    fcntl_lock(fd, libc::F_WRLCK, PENDING_BYTE, 1)?;
-                }
-                LockLevel::Exclusive => {
-                    // Write lock over the entire shared range.
-                    fcntl_lock(fd, libc::F_WRLCK, SHARED_FIRST, SHARED_SIZE)?;
-                }
-                LockLevel::None => {}
+            if self.lock < LockLevel::Shared && level >= LockLevel::Shared {
+                // Read lock on a byte in the shared range.
+                fcntl_lock(fd, libc::F_RDLCK, SHARED_FIRST, 1)?;
+                self.lock = LockLevel::Shared;
+            }
+            if self.lock < LockLevel::Reserved && level == LockLevel::Reserved {
+                // Write lock on the reserved byte.
+                fcntl_lock(fd, libc::F_WRLCK, RESERVED_BYTE, 1)?;
+                self.lock = LockLevel::Reserved;
+            }
+            if self.lock < LockLevel::Pending && level >= LockLevel::Pending {
+                // Write lock on the pending byte.
+                fcntl_lock(fd, libc::F_WRLCK, PENDING_BYTE, 1)?;
+                self.lock = LockLevel::Pending;
+            }
+            if level >= LockLevel::Exclusive {
+                // Write lock over the entire shared range.
+                fcntl_lock(fd, libc::F_WRLCK, SHARED_FIRST, SHARED_SIZE)?;
+                self.lock = LockLevel::Exclusive;
             }
         }
-        self.lock = level;
+        #[cfg(not(unix))]
+        {
+            self.lock = level;
+        }
         Ok(())
     }
 
@@ -226,10 +230,12 @@ impl Vfs for UnixVfs {
     fn delete(&self, path: &Path, sync_dir: bool) -> io::Result<()> {
         std::fs::remove_file(path)?;
         if sync_dir {
-            if let Some(parent) = path.parent() {
-                let dir = File::open(parent)?;
-                dir.sync_all()?;
-            }
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let dir = File::open(parent)?;
+            dir.sync_all()?;
         }
         Ok(())
     }
@@ -350,5 +356,112 @@ mod tests {
         assert!(f
             .device_characteristics()
             .contains(DeviceCharacteristics::SAFE_APPEND));
+    }
+
+    #[test]
+    fn truncate_file() {
+        let (_tmp, mut f) = open_file();
+        f.write(b"hello world", 0).unwrap();
+        f.truncate(5).unwrap();
+        assert_eq!(f.file_size().unwrap(), 5);
+    }
+
+    #[test]
+    fn sync_normal_and_data_only() {
+        let (_tmp, mut f) = open_file();
+        f.write(b"data", 0).unwrap();
+        f.sync(SyncFlags::NORMAL).unwrap();
+        f.sync(SyncFlags::DATA_ONLY).unwrap();
+    }
+
+    #[test]
+    fn file_size_reports_metadata_length() {
+        let (_tmp, mut f) = open_file();
+        f.write(b"hello", 0).unwrap();
+        assert_eq!(f.file_size().unwrap(), 5);
+    }
+
+    #[test]
+    fn lock_pending_directly() {
+        let (_tmp, mut f) = open_file();
+        f.lock(LockLevel::Pending).unwrap();
+        assert_eq!(f.lock, LockLevel::Pending);
+    }
+
+    #[test]
+    fn unlock_from_pending_and_reserved_levels() {
+        let (_tmp, mut f) = open_file();
+        f.lock(LockLevel::Pending).unwrap();
+        f.unlock(LockLevel::None).unwrap();
+        assert_eq!(f.lock, LockLevel::None);
+
+        f.lock(LockLevel::Reserved).unwrap();
+        f.unlock(LockLevel::None).unwrap();
+        assert_eq!(f.lock, LockLevel::None);
+    }
+
+    #[test]
+    fn vfs_delete_without_and_with_sync_dir() {
+        let vfs = UnixVfs;
+
+        let tmp1 = NamedTempFile::new().unwrap();
+        let path1 = tmp1.path().to_path_buf();
+        drop(tmp1); // remove NamedTempFile's own Drop-based deletion race
+        std::fs::write(&path1, b"x").unwrap();
+        vfs.delete(&path1, false).unwrap();
+        assert!(!path1.exists());
+
+        let tmp2 = NamedTempFile::new().unwrap();
+        let path2 = tmp2.path().to_path_buf();
+        drop(tmp2);
+        std::fs::write(&path2, b"x").unwrap();
+        vfs.delete(&path2, true).unwrap();
+        assert!(!path2.exists());
+    }
+
+    #[test]
+    fn vfs_access_and_full_pathname() {
+        let vfs = UnixVfs;
+        let tmp = NamedTempFile::new().unwrap();
+        assert!(vfs.access(tmp.path(), AccessFlags::EXISTS).unwrap());
+        let canon = vfs.full_pathname(tmp.path()).unwrap();
+        assert!(canon.is_absolute());
+
+        let missing = tmp.path().with_extension("missing");
+        assert!(!vfs.access(&missing, AccessFlags::EXISTS).unwrap());
+    }
+
+    #[test]
+    fn unlock_directly_from_exclusive_to_none() {
+        // Exercises the branch where, after dropping an exclusive lock, the
+        // target level is below Shared so the shared lock is *not*
+        // re-acquired.
+        let (_tmp, mut f) = open_file();
+        f.lock(LockLevel::Exclusive).unwrap();
+        f.unlock(LockLevel::None).unwrap();
+        assert_eq!(f.lock, LockLevel::None);
+    }
+
+    #[test]
+    fn fcntl_lock_and_has_lock_error_on_invalid_fd() {
+        // An invalid file descriptor makes the underlying fcntl(2) syscall
+        // fail with EBADF, exercising the error branch of each helper.
+        assert!(fcntl_lock(-1, libc::F_WRLCK, 0, 1).is_err());
+        assert!(fcntl_has_lock(-1, libc::F_WRLCK, 0, 1).is_err());
+    }
+
+    #[test]
+    fn vfs_randomness_sleep_time_name() {
+        let vfs = UnixVfs;
+        let mut buf = [0u8; 16];
+        vfs.randomness(&mut buf);
+        assert_ne!(buf, [0u8; 16]);
+
+        vfs.sleep(0);
+
+        let t = vfs.current_time();
+        assert!(t > 0.0);
+
+        assert_eq!(vfs.name(), "unix");
     }
 }

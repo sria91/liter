@@ -297,6 +297,8 @@ pub unsafe extern "C" fn sqlite3_column_bytes(stmt: *mut sqlite3_stmt, i_col: c_
     match stmt_ref.stmt.column_value(i_col as usize) {
         Ok(Value::Text(t)) => t.len() as c_int,
         Ok(Value::Blob(b)) => b.len() as c_int,
+        Ok(Value::Int(i)) => i.to_string().len() as c_int,
+        Ok(Value::Real(f)) => f.to_string().len() as c_int,
         _ => 0,
     }
 }
@@ -399,4 +401,632 @@ pub unsafe extern "C" fn sqlite3_free(_p: *mut c_void) {
     // liter-ffi does not currently allocate error strings through a C-compatible
     // allocator, so sqlite3_exec() never sets *pzErrMsg. This function is always
     // called with NULL and is intentionally a no-op.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ptr;
+
+    /// Open an in-memory database, panicking on failure. Helper for tests
+    /// that need a live connection but aren't testing `sqlite3_open` itself.
+    unsafe fn open_mem() -> *mut sqlite3 {
+        let mut db: *mut sqlite3 = ptr::null_mut();
+        let rc = sqlite3_open(b":memory:\0".as_ptr() as *const c_char, &mut db);
+        assert_eq!(rc, SQLITE_OK);
+        assert!(!db.is_null());
+        db
+    }
+
+    /// Prepare `sql` against `db`, panicking on failure.
+    unsafe fn prepare(db: *mut sqlite3, sql: &str) -> *mut sqlite3_stmt {
+        let c_sql = CString::new(sql).unwrap();
+        let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
+        let rc = sqlite3_prepare_v2(db, c_sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
+        assert_eq!(rc, SQLITE_OK, "prepare failed for {sql:?}");
+        assert!(!stmt.is_null());
+        stmt
+    }
+
+    unsafe fn exec_ok(db: *mut sqlite3, sql: &str) {
+        let c_sql = CString::new(sql).unwrap();
+        let rc = sqlite3_exec(db, c_sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut());
+        assert_eq!(rc, SQLITE_OK, "exec failed for {sql:?}");
+    }
+
+    // ── map_err ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn map_err_covers_every_variant() {
+        assert_eq!(map_err(SqliteError::Sql("x".into())), SQLITE_ERROR);
+        assert_eq!(map_err(SqliteError::NoMem), SQLITE_NOMEM);
+        assert_eq!(
+            map_err(SqliteError::Io(std::io::Error::other("boom"))),
+            SQLITE_IOERR
+        );
+        assert_eq!(map_err(SqliteError::Corrupt), SQLITE_CORRUPT);
+        assert_eq!(map_err(SqliteError::Busy), SQLITE_BUSY);
+        assert_eq!(
+            map_err(SqliteError::Constraint("dup".into())),
+            SQLITE_CONSTRAINT
+        );
+        assert_eq!(map_err(SqliteError::Auth), SQLITE_AUTH);
+        assert_eq!(map_err(SqliteError::NotImplemented), SQLITE_ERROR);
+        assert_eq!(map_err(SqliteError::Parse("bad sql".into())), SQLITE_ERROR);
+    }
+
+    // ── sqlite3_open / sqlite3_close ─────────────────────────────────────────
+
+    #[test]
+    fn open_null_pp_db_is_misuse() {
+        unsafe {
+            let rc = sqlite3_open(b":memory:\0".as_ptr() as *const c_char, ptr::null_mut());
+            assert_eq!(rc, SQLITE_MISUSE);
+        }
+    }
+
+    #[test]
+    fn open_null_filename_defaults_to_memory() {
+        unsafe {
+            let mut db: *mut sqlite3 = ptr::null_mut();
+            let rc = sqlite3_open(ptr::null(), &mut db);
+            assert_eq!(rc, SQLITE_OK);
+            assert!(!db.is_null());
+            assert_eq!(sqlite3_close(db), SQLITE_OK);
+        }
+    }
+
+    #[test]
+    fn open_invalid_path_returns_cantopen() {
+        unsafe {
+            let path =
+                CString::new("/no/such/directory/liter-ffi-test-db-does-not-exist.sqlite").unwrap();
+            let mut db: *mut sqlite3 = ptr::null_mut();
+            let rc = sqlite3_open(path.as_ptr(), &mut db);
+            assert_eq!(rc, SQLITE_CANTOPEN);
+            assert!(db.is_null());
+        }
+    }
+
+    #[test]
+    fn open_real_file_path_succeeds_and_can_reopen() {
+        unsafe {
+            let mut path = std::env::temp_dir();
+            path.push(format!("liter_ffi_test_{}.sqlite", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let c_path = CString::new(path.to_str().unwrap()).unwrap();
+
+            let mut db: *mut sqlite3 = ptr::null_mut();
+            let rc = sqlite3_open(c_path.as_ptr(), &mut db);
+            assert_eq!(rc, SQLITE_OK);
+            assert!(!db.is_null());
+            assert_eq!(sqlite3_close(db), SQLITE_OK);
+
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[test]
+    fn close_null_is_a_noop_ok() {
+        unsafe {
+            assert_eq!(sqlite3_close(ptr::null_mut()), SQLITE_OK);
+        }
+    }
+
+    // ── sqlite3_exec ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn exec_null_db_is_misuse() {
+        unsafe {
+            let sql = b"SELECT 1;\0".as_ptr() as *const c_char;
+            let rc = sqlite3_exec(ptr::null_mut(), sql, None, ptr::null_mut(), ptr::null_mut());
+            assert_eq!(rc, SQLITE_MISUSE);
+        }
+    }
+
+    #[test]
+    fn exec_null_sql_is_misuse() {
+        unsafe {
+            let db = open_mem();
+            let rc = sqlite3_exec(db, ptr::null(), None, ptr::null_mut(), ptr::null_mut());
+            assert_eq!(rc, SQLITE_MISUSE);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn exec_invalid_sql_maps_error() {
+        unsafe {
+            let db = open_mem();
+            let sql = CString::new("THIS IS NOT VALID SQL").unwrap();
+            let rc = sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut());
+            assert_ne!(rc, SQLITE_OK);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn exec_create_and_insert_succeeds() {
+        unsafe {
+            let db = open_mem();
+            exec_ok(db, "CREATE TABLE t (id INTEGER, name TEXT)");
+            exec_ok(db, "INSERT INTO t VALUES (1, 'alice')");
+            sqlite3_close(db);
+        }
+    }
+
+    // ── sqlite3_prepare_v2 ────────────────────────────────────────────────────
+
+    #[test]
+    fn prepare_null_db_is_misuse() {
+        unsafe {
+            let sql = CString::new("SELECT 1").unwrap();
+            let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
+            let rc = sqlite3_prepare_v2(
+                ptr::null_mut(),
+                sql.as_ptr(),
+                -1,
+                &mut stmt,
+                ptr::null_mut(),
+            );
+            assert_eq!(rc, SQLITE_MISUSE);
+        }
+    }
+
+    #[test]
+    fn prepare_null_sql_is_misuse() {
+        unsafe {
+            let db = open_mem();
+            let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
+            let rc = sqlite3_prepare_v2(db, ptr::null(), -1, &mut stmt, ptr::null_mut());
+            assert_eq!(rc, SQLITE_MISUSE);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn prepare_null_pp_stmt_is_misuse() {
+        unsafe {
+            let db = open_mem();
+            let sql = CString::new("SELECT 1").unwrap();
+            let rc = sqlite3_prepare_v2(db, sql.as_ptr(), -1, ptr::null_mut(), ptr::null_mut());
+            assert_eq!(rc, SQLITE_MISUSE);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn prepare_invalid_sql_maps_error_and_leaves_stmt_null() {
+        unsafe {
+            let db = open_mem();
+            let sql = CString::new("NOT VALID SQL AT ALL").unwrap();
+            let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
+            let rc = sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
+            assert_ne!(rc, SQLITE_OK);
+            assert!(stmt.is_null());
+            sqlite3_close(db);
+        }
+    }
+
+    // ── sqlite3_step / sqlite3_reset / sqlite3_finalize ───────────────────────
+
+    #[test]
+    fn step_null_stmt_is_misuse() {
+        unsafe {
+            assert_eq!(sqlite3_step(ptr::null_mut()), SQLITE_MISUSE);
+        }
+    }
+
+    #[test]
+    fn step_runtime_error_is_mapped() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 1/0");
+            let rc = sqlite3_step(stmt);
+            assert_ne!(rc, SQLITE_ROW);
+            assert_ne!(rc, SQLITE_DONE);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn reset_null_stmt_is_misuse() {
+        unsafe {
+            assert_eq!(sqlite3_reset(ptr::null_mut()), SQLITE_MISUSE);
+        }
+    }
+
+    #[test]
+    fn reset_allows_statement_reuse() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 42");
+
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_int64(stmt, 0), 42);
+            assert_eq!(sqlite3_step(stmt), SQLITE_DONE);
+
+            assert_eq!(sqlite3_reset(stmt), SQLITE_OK);
+
+            // After reset, the statement can be stepped again from the start.
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_int64(stmt, 0), 42);
+            assert_eq!(sqlite3_step(stmt), SQLITE_DONE);
+
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn finalize_null_stmt_is_a_noop_ok() {
+        unsafe {
+            assert_eq!(sqlite3_finalize(ptr::null_mut()), SQLITE_OK);
+        }
+    }
+
+    // ── sqlite3_column_* ──────────────────────────────────────────────────────
+
+    #[test]
+    fn column_int64_null_stmt_is_zero() {
+        unsafe {
+            assert_eq!(sqlite3_column_int64(ptr::null_mut(), 0), 0);
+        }
+    }
+
+    #[test]
+    fn column_int64_from_real_truncates() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 3.9");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_int64(stmt, 0), 3);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_int64_from_text_falls_back_to_zero() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 'hi'");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_int64(stmt, 0), 0);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_double_null_stmt_is_zero() {
+        unsafe {
+            assert_eq!(sqlite3_column_double(ptr::null_mut(), 0), 0.0);
+        }
+    }
+
+    #[test]
+    fn column_double_from_real() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 2.5");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_double(stmt, 0), 2.5);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_double_from_int_converts() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 7");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_double(stmt, 0), 7.0);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_double_from_text_falls_back_to_zero() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 'hi'");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_double(stmt, 0), 0.0);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_text_null_stmt_is_null_ptr() {
+        unsafe {
+            assert!(sqlite3_column_text(ptr::null_mut(), 0).is_null());
+        }
+    }
+
+    #[test]
+    fn column_text_from_text_value() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 'hello'");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            let ptr = sqlite3_column_text(stmt, 0);
+            assert!(!ptr.is_null());
+            let s = CStr::from_ptr(ptr).to_str().unwrap();
+            assert_eq!(s, "hello");
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_text_is_cached_across_calls() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 'hello'");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            let ptr1 = sqlite3_column_text(stmt, 0);
+            let ptr2 = sqlite3_column_text(stmt, 0);
+            assert_eq!(ptr1, ptr2, "second call should hit the text cache");
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_text_from_int_value() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 123");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            let ptr = sqlite3_column_text(stmt, 0);
+            assert!(!ptr.is_null());
+            assert_eq!(CStr::from_ptr(ptr).to_str().unwrap(), "123");
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_text_from_real_value() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 4.5");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            let ptr = sqlite3_column_text(stmt, 0);
+            assert!(!ptr.is_null());
+            assert_eq!(CStr::from_ptr(ptr).to_str().unwrap(), "4.5");
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_text_from_null_value_is_null_ptr() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT NULL");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            let ptr = sqlite3_column_text(stmt, 0);
+            assert!(ptr.is_null());
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_type_null_stmt_is_zero() {
+        unsafe {
+            assert_eq!(sqlite3_column_type(ptr::null_mut(), 0), 0);
+        }
+    }
+
+    #[test]
+    fn column_type_reports_each_kind() {
+        unsafe {
+            let db = open_mem();
+
+            let stmt = prepare(db, "SELECT 1");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_type(stmt, 0), SQLITE_INTEGER);
+            sqlite3_finalize(stmt);
+
+            let stmt = prepare(db, "SELECT 1.5");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_type(stmt, 0), SQLITE_FLOAT);
+            sqlite3_finalize(stmt);
+
+            let stmt = prepare(db, "SELECT 'x'");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_type(stmt, 0), SQLITE_TEXT);
+            sqlite3_finalize(stmt);
+
+            let stmt = prepare(db, "SELECT zeroblob(3)");
+            let step_result = sqlite3_step(stmt);
+            println!("sqlite3_step returned: {}", step_result);
+            assert_eq!(step_result, SQLITE_ROW);
+            let stmt_ref = &*stmt;
+            let value = stmt_ref.stmt.column_value(0);
+            println!("zeroblob(3) column_value result: {:?}", value);
+            match &value {
+                Ok(v) => println!("zeroblob(3) value: {:?}", v),
+                Err(e) => println!("zeroblob(3) column_value error: {:?}", e),
+            }
+            let type_result = sqlite3_column_type(stmt, 0);
+            println!("sqlite3_column_type returned: {}", type_result);
+            assert_eq!(step_result, SQLITE_ROW);
+            assert_eq!(type_result, SQLITE_BLOB);
+            assert_eq!(sqlite3_column_bytes(stmt, 0), 3);
+            sqlite3_finalize(stmt);
+
+            let stmt = prepare(db, "SELECT NULL");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_type(stmt, 0), SQLITE_NULL);
+            sqlite3_finalize(stmt);
+
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_type_out_of_range_is_zero() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 1");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            // Column index 5 doesn't exist on a single-column result set.
+            assert_eq!(sqlite3_column_type(stmt, 5), 0);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_bytes_null_stmt_is_zero() {
+        unsafe {
+            assert_eq!(sqlite3_column_bytes(ptr::null_mut(), 0), 0);
+        }
+    }
+
+    #[test]
+    fn column_bytes_of_text() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 'hello'");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_bytes(stmt, 0), 5);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_bytes_of_numeric_returns_text_len() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 1");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            // After coercion, "1" is 1 byte
+            assert_eq!(sqlite3_column_bytes(stmt, 0), 1);
+            sqlite3_finalize(stmt);
+
+            let stmt = prepare(db, "SELECT 42");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_bytes(stmt, 0), 2);
+            sqlite3_finalize(stmt);
+
+            let stmt = prepare(db, "SELECT 1.5");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert!(sqlite3_column_bytes(stmt, 0) > 0);
+            sqlite3_finalize(stmt);
+
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_count_null_stmt_is_zero() {
+        unsafe {
+            assert_eq!(sqlite3_column_count(ptr::null_mut()), 0);
+        }
+    }
+
+    #[test]
+    fn column_count_matches_before_and_after_step() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 1, 2, 3");
+            assert_eq!(sqlite3_column_count(stmt), 3);
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_count(stmt), 3);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn column_name_returns_empty_string() {
+        unsafe {
+            let db = open_mem();
+            let stmt = prepare(db, "SELECT 1");
+            let name = sqlite3_column_name(stmt, 0);
+            assert!(!name.is_null());
+            assert_eq!(CStr::from_ptr(name).to_str().unwrap(), "");
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    // ── misc metadata / stub functions ───────────────────────────────────────
+
+    #[test]
+    fn errmsg_returns_placeholder() {
+        unsafe {
+            let msg = sqlite3_errmsg(ptr::null_mut());
+            assert_eq!(CStr::from_ptr(msg).to_str().unwrap(), "not implemented");
+        }
+    }
+
+    #[test]
+    fn changes_stub_returns_zero() {
+        unsafe {
+            assert_eq!(sqlite3_changes(ptr::null_mut()), 0);
+        }
+    }
+
+    #[test]
+    fn last_insert_rowid_stub_returns_zero() {
+        unsafe {
+            assert_eq!(sqlite3_last_insert_rowid(ptr::null_mut()), 0);
+        }
+    }
+
+    #[test]
+    fn bind_parameter_count_stub_returns_zero() {
+        unsafe {
+            assert_eq!(sqlite3_bind_parameter_count(ptr::null_mut()), 0);
+        }
+    }
+
+    #[test]
+    fn bind_functions_are_unimplemented_stubs() {
+        unsafe {
+            assert_eq!(sqlite3_bind_int64(ptr::null_mut(), 1, 42), SQLITE_ERROR);
+            assert_eq!(sqlite3_bind_double(ptr::null_mut(), 1, 4.2), SQLITE_ERROR);
+            assert_eq!(sqlite3_bind_null(ptr::null_mut(), 1), SQLITE_ERROR);
+
+            let text = CString::new("hi").unwrap();
+            assert_eq!(
+                sqlite3_bind_text(ptr::null_mut(), 1, text.as_ptr(), 2, None),
+                SQLITE_ERROR
+            );
+
+            let blob = [1u8, 2, 3];
+            assert_eq!(
+                sqlite3_bind_blob(ptr::null_mut(), 1, blob.as_ptr() as *const c_void, 3, None),
+                SQLITE_ERROR
+            );
+        }
+    }
+
+    #[test]
+    fn libversion_matches_expected_string_and_number() {
+        unsafe {
+            let v = sqlite3_libversion();
+            assert_eq!(CStr::from_ptr(v).to_str().unwrap(), "3.53.0");
+            assert_eq!(sqlite3_libversion_number(), 3_053_000);
+        }
+    }
+
+    #[test]
+    fn free_on_null_is_a_noop() {
+        unsafe {
+            sqlite3_free(ptr::null_mut());
+        }
+    }
 }

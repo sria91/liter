@@ -10,4 +10,5 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 liter = { path = "../liter" }
+liter-functions = { path = "../liter-functions" }
 thiserror.workspace = true

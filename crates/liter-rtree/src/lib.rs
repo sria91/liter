@@ -140,6 +140,113 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_rtree_table_new() {
+        let table = RTreeTable::new("spatial_idx", 2);
+        assert_eq!(table.name, "spatial_idx");
+        assert_eq!(table.dimensions, 2);
+    }
+
+    #[test]
+    fn test_volume() {
+        let e = RTreeEntry::new(
+            1,
+            vec![
+                BoundingBox { min: 0.0, max: 2.0 },
+                BoundingBox { min: 0.0, max: 3.0 },
+            ],
+        );
+        assert_eq!(e.volume(), 6.0);
+    }
+
+    #[test]
+    fn test_containment_dimension_mismatch() {
+        let e = RTreeEntry::new(1, vec![BoundingBox { min: 0.0, max: 1.0 }]);
+        let bounds = vec![
+            BoundingBox { min: 0.0, max: 1.0 },
+            BoundingBox { min: 0.0, max: 1.0 },
+        ];
+        assert!(!e.is_contained_in(&bounds));
+    }
+
+    #[test]
+    fn test_linear_split_empty_entries() {
+        let mut node = RTreeNode {
+            is_leaf: true,
+            entries: vec![],
+        };
+        let (n1, n2) = node.linear_split();
+        assert!(n1.entries.is_empty());
+        assert!(n2.entries.is_empty());
+    }
+
+    #[test]
+    fn test_linear_split_min_idx_updates() {
+        // Second entry has the smallest min, exercising the min_idx update branch.
+        let mut node = RTreeNode {
+            is_leaf: true,
+            entries: vec![
+                RTreeEntry::new(1, vec![BoundingBox { min: 5.0, max: 6.0 }]),
+                RTreeEntry::new(
+                    2,
+                    vec![BoundingBox {
+                        min: -10.0,
+                        max: -9.0,
+                    }],
+                ),
+                RTreeEntry::new(
+                    3,
+                    vec![BoundingBox {
+                        min: 20.0,
+                        max: 21.0,
+                    }],
+                ),
+            ],
+        };
+        let (n1, n2) = node.linear_split();
+        assert_eq!(n1.entries.len() + n2.entries.len(), 3);
+    }
+
+    #[test]
+    fn test_linear_split_overlapping_seeds_fallback() {
+        // All entries share identical bounds so min_idx == max_idx, exercising the fallback.
+        let mut node = RTreeNode {
+            is_leaf: true,
+            entries: vec![
+                RTreeEntry::new(1, vec![BoundingBox { min: 1.0, max: 1.0 }]),
+                RTreeEntry::new(2, vec![BoundingBox { min: 1.0, max: 1.0 }]),
+                RTreeEntry::new(3, vec![BoundingBox { min: 1.0, max: 1.0 }]),
+            ],
+        };
+        let (n1, n2) = node.linear_split();
+        assert_eq!(n1.entries.len() + n2.entries.len(), 3);
+    }
+
+    #[test]
+    fn test_linear_split_distributes_to_smaller_node() {
+        // With 4 entries, after seeding node1/node2 with 1 each, the two
+        // remaining entries are distributed one to each side, exercising the
+        // branch that pushes onto the currently-smaller node (node1).
+        let mut node = RTreeNode {
+            is_leaf: true,
+            entries: vec![
+                RTreeEntry::new(1, vec![BoundingBox { min: 0.0, max: 1.0 }]),
+                RTreeEntry::new(
+                    2,
+                    vec![BoundingBox {
+                        min: 10.0,
+                        max: 11.0,
+                    }],
+                ),
+                RTreeEntry::new(3, vec![BoundingBox { min: 5.0, max: 6.0 }]),
+                RTreeEntry::new(4, vec![BoundingBox { min: 7.0, max: 8.0 }]),
+            ],
+        };
+        let (n1, n2) = node.linear_split();
+        assert_eq!(n1.entries.len(), 2);
+        assert_eq!(n2.entries.len(), 2);
+    }
+
+    #[test]
     fn test_containment() {
         let e = RTreeEntry::new(
             1,

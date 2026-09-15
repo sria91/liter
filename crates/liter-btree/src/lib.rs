@@ -813,16 +813,20 @@ impl BTreeCursor<'_> {
                 self.descend_last(hdr.rightmost_child)
             };
         }
-        let last = hdr.cell_count - 1;
-        self.stack.push(CursorFrame {
-            pgno,
-            cell_idx: last,
-        });
         if hdr.kind.is_leaf() {
+            let last = hdr.cell_count - 1;
+            self.stack.push(CursorFrame {
+                pgno,
+                cell_idx: last,
+            });
             self.load_cell(&pd, &hdr, last)?;
             self.state = CursorState::Valid;
             Ok(true)
         } else {
+            self.stack.push(CursorFrame {
+                pgno,
+                cell_idx: hdr.cell_count,
+            });
             self.descend_last(hdr.rightmost_child)
         }
     }
@@ -1530,5 +1534,409 @@ mod tests {
         cur.move_to_first().unwrap();
         assert!(cur.is_valid());
         assert_eq!(cur.data().unwrap(), payload.as_slice());
+    }
+
+    #[test]
+    fn test_page_kind_methods() {
+        let ik = PageKind::from_byte(PAGE_TYPE_INDEX_INTERIOR).unwrap();
+        let il = PageKind::from_byte(PAGE_TYPE_INDEX_LEAF).unwrap();
+        let ti = PageKind::from_byte(PAGE_TYPE_TABLE_INTERIOR).unwrap();
+        let tl = PageKind::from_byte(PAGE_TYPE_TABLE_LEAF).unwrap();
+
+        assert_eq!(ik, PageKind::IndexInterior);
+        assert_eq!(il, PageKind::IndexLeaf);
+        assert_eq!(ti, PageKind::TableInterior);
+        assert_eq!(tl, PageKind::TableLeaf);
+
+        assert!(!ik.is_table());
+        assert!(!il.is_table());
+        assert!(ti.is_table());
+        assert!(tl.is_table());
+
+        assert!(!ik.is_leaf());
+        assert!(il.is_leaf());
+        assert!(!ti.is_leaf());
+        assert!(tl.is_leaf());
+
+        assert_eq!(ik.type_byte(), PAGE_TYPE_INDEX_INTERIOR);
+        assert_eq!(il.type_byte(), PAGE_TYPE_INDEX_LEAF);
+        assert_eq!(ti.type_byte(), PAGE_TYPE_TABLE_INTERIOR);
+        assert_eq!(tl.type_byte(), PAGE_TYPE_TABLE_LEAF);
+
+        assert_eq!(ik.header_size(), 12);
+        assert_eq!(il.header_size(), 8);
+        assert_eq!(ti.header_size(), 12);
+        assert_eq!(tl.header_size(), 8);
+
+        assert_eq!(ik.to_interior(), PageKind::IndexInterior);
+        assert_eq!(il.to_interior(), PageKind::IndexInterior);
+        assert_eq!(ti.to_interior(), PageKind::TableInterior);
+        assert_eq!(tl.to_interior(), PageKind::TableInterior);
+
+        assert!(PageKind::from_byte(0x00).is_err());
+        assert!(PageKind::from_byte(0xFF).is_err());
+    }
+
+    #[test]
+    fn test_btree_lifecycle_and_transactions() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_btree.db");
+
+        let bt = BTree::open(&db_path, false).unwrap();
+        assert_eq!(bt.meta(), &[0u32; 16]);
+        let _pager = bt.pager();
+
+        bt.begin_write().unwrap();
+        let pg1 = bt.allocate_page(PageKind::TableLeaf).unwrap();
+        assert_eq!(pg1, 1);
+        bt.commit().unwrap();
+
+        bt.begin_write().unwrap();
+        let pg2 = bt.allocate_page(PageKind::TableLeaf).unwrap();
+        assert_eq!(pg2, 2);
+        bt.rollback().unwrap();
+
+        // Read only open
+        let bt_ro = BTree::open(&db_path, true).unwrap();
+        assert_eq!(bt_ro.meta(), &[0u32; 16]);
+    }
+
+    #[test]
+    fn test_cursor_operations_and_error_paths() {
+        let bt = new_bt();
+        let mut cur = bt.cursor(1, false).unwrap();
+        assert_eq!(cur.root_page(), 1);
+        assert!(!cur.is_valid());
+
+        // Invalid cursor operations
+        assert!(cur.key().is_err());
+        assert!(cur.data().is_err());
+        assert!(cur.rowid().is_err());
+        assert!(!cur.next().unwrap());
+        assert!(!cur.previous().unwrap());
+        assert!(cur.delete().is_err());
+
+        // Max rowid on empty table
+        assert_eq!(cur.max_rowid().unwrap(), 0);
+
+        // move_to with invalid key length
+        assert!(cur.move_to(&[1, 2, 3], SeekBias::Ge).is_err());
+
+        // insert with invalid key length
+        assert!(cur.insert(&[1, 2, 3], b"val", false).is_err());
+
+        // Insert row 10 and 20
+        cur.insert(&10u64.to_be_bytes(), b"ten", false).unwrap();
+        cur.insert(&20u64.to_be_bytes(), b"twenty", false).unwrap();
+
+        // Max rowid with data
+        assert_eq!(cur.max_rowid().unwrap(), 20);
+
+        // Cursor seek and rowid
+        assert_eq!(
+            cur.move_to(&10u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Equal
+        );
+        assert!(cur.is_valid());
+        assert_eq!(cur.rowid().unwrap(), 10);
+        assert_eq!(cur.data().unwrap(), b"ten");
+
+        // Move to last, delete the last element
+        cur.move_to_last().unwrap();
+        assert_eq!(cur.rowid().unwrap(), 20);
+        cur.delete().unwrap();
+        // Cursor exhausted (deleted last element on page)
+        assert!(!cur.is_valid());
+        assert!(cur.key().is_err());
+
+        // Remaining element is 10
+        cur.move_to_first().unwrap();
+        assert_eq!(cur.rowid().unwrap(), 10);
+        cur.delete().unwrap();
+        // Now table is empty
+        assert!(!cur.is_valid());
+        assert_eq!(cur.max_rowid().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_multi_page_reverse_traversal_and_seek() {
+        let bt = new_bt();
+        let mut cur = bt.cursor(1, true).unwrap();
+        let payload = vec![0x33; 100];
+        // Insert enough rows to create multiple levels of tree
+        for i in 1u64..=200 {
+            cur.insert(&i.to_be_bytes(), &payload, false).unwrap();
+        }
+
+        // Seek miss > max
+        assert_eq!(
+            cur.move_to(&999u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Less
+        );
+
+        // Reverse traversal
+        cur.move_to_last().unwrap();
+        let mut expected = 200u64;
+        while cur.is_valid() {
+            let r = cur.rowid().unwrap() as u64;
+            assert_eq!(r, expected);
+            expected -= 1;
+            cur.previous().unwrap();
+        }
+        assert_eq!(expected, 0);
+
+        // Test step_prev through interior nodes
+        cur.move_to(&100u64.to_be_bytes(), SeekBias::Ge).unwrap();
+        assert_eq!(cur.rowid().unwrap(), 100);
+        cur.previous().unwrap();
+        assert_eq!(cur.rowid().unwrap(), 99);
+    }
+
+    #[test]
+    fn test_interior_divider_helpers() {
+        let bt = new_bt();
+        let p1 = bt.allocate_page(PageKind::TableInterior).unwrap();
+        let p2 = bt.allocate_page(PageKind::TableLeaf).unwrap();
+        let p3 = bt.allocate_page(PageKind::TableLeaf).unwrap();
+
+        assert!(insert_interior_divider(&bt.pager, p1, 50, p2, p3, DEFAULT_PAGE_SIZE).is_ok());
+        assert!(insert_interior_divider(&bt.pager, p1, 100, p2, p3, DEFAULT_PAGE_SIZE).is_ok());
+
+        let mut pg = bt.pager.lock().unwrap();
+        let data = pg.acquire(p1).unwrap();
+        let hdr = PageHeader::parse(&data, p1).unwrap();
+        assert_eq!(cell_rowid_for_last_interior(&data, &hdr).unwrap(), 100);
+
+        let empty_hdr = PageHeader {
+            kind: PageKind::TableInterior,
+            cell_count: 0,
+            cell_content_start: DEFAULT_PAGE_SIZE as u32,
+            rightmost_child: 0,
+            header_offset: 0,
+        };
+        assert_eq!(cell_rowid_for_last_interior(&data, &empty_hdr).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_load_cell_index_leaf_and_error_cases() {
+        let bt = new_bt();
+        let p_idx = bt.allocate_page(PageKind::IndexLeaf).unwrap();
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(p_idx).unwrap();
+            // Create a small index leaf cell: [varint plen = 4][payload = 1, 2, 3, 4]
+            let cell = vec![4u8, 0xAA, 0xBB, 0xCC, 0xDD];
+            insert_cell_raw(data, p_idx, &cell, DEFAULT_PAGE_SIZE, 0).unwrap();
+        }
+
+        let mut cur = bt.cursor(p_idx, false).unwrap();
+        cur.move_to_first().unwrap();
+        assert!(cur.is_valid());
+        assert_eq!(cur.key().unwrap(), &[0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(cur.data().unwrap(), &[]);
+
+        // Corrupt page header
+        let raw = vec![0u8; 10];
+        assert!(PageHeader::parse(&raw, 1).is_err());
+    }
+
+    #[test]
+    fn test_btree_seek_biases_and_edges() {
+        let bt = new_bt();
+        let mut cur = bt.cursor(1, true).unwrap();
+        for r in [10u64, 20, 30, 40] {
+            cur.insert(&r.to_be_bytes(), b"val", false).unwrap();
+        }
+
+        // Seek Ge exact
+        assert_eq!(
+            cur.move_to(&20u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Equal
+        );
+        assert_eq!(cur.rowid().unwrap(), 20);
+
+        // Seek Ge between 20 and 30 -> finds 30 (Greater)
+        assert_eq!(
+            cur.move_to(&25u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Greater
+        );
+        assert_eq!(cur.rowid().unwrap(), 30);
+
+        // Seek Ge beyond largest element (50 > 40)
+        assert_eq!(
+            cur.move_to(&50u64.to_be_bytes(), SeekBias::Ge).unwrap(),
+            SeekResult::Less
+        );
+        assert!(!cur.is_valid());
+    }
+
+    #[test]
+    fn test_btree_error_and_corrupt_branches() {
+        let bt = new_bt();
+        let p_idx = bt.allocate_page(PageKind::IndexLeaf).unwrap();
+        let mut cur = bt.cursor(p_idx, false).unwrap();
+        // Rowid on index leaf is corrupt/error
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(p_idx).unwrap();
+            let cell = vec![2u8, 0x11, 0x22];
+            insert_cell_raw(data, p_idx, &cell, DEFAULT_PAGE_SIZE, 0).unwrap();
+        }
+        cur.move_to_first().unwrap();
+        assert!(cur.rowid().is_err());
+
+        // cell_rowid on index page errors
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.acquire(p_idx).unwrap();
+            let hdr = PageHeader::parse(&data, p_idx).unwrap();
+            assert!(cell_rowid(&data, &hdr, 0).is_err());
+            assert!(cell_rowid(&data, &hdr, 100).is_err());
+
+            // PageHeader cell_ptr out of bounds
+            assert!(hdr.cell_ptr(&data, 5000).is_err());
+
+            // left_child out of bounds
+            assert!(left_child(&data, &hdr, 5000).is_err());
+        }
+
+        // get_varint out of bounds
+        assert!(get_varint(&[1, 2], 5).is_err());
+
+        // TableInterior cell_rowid with cell < 5 bytes
+        let p_int = bt.allocate_page(PageKind::TableInterior).unwrap();
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(p_int).unwrap();
+            let cell = vec![1, 2, 3]; // shorter than 5 bytes
+            insert_cell_raw(data, p_int, &cell, DEFAULT_PAGE_SIZE, 0).unwrap();
+        }
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.acquire(p_int).unwrap();
+            let hdr = PageHeader::parse(&data, p_int).unwrap();
+            assert!(cell_rowid(&data, &hdr, 0).is_err());
+        }
+
+        // Descend on empty interior page (cell_count == 0, follows rightmost_child)
+        let p_int_empty = bt.allocate_page(PageKind::TableInterior).unwrap();
+        let p_leaf_child = bt.allocate_page(PageKind::TableLeaf).unwrap();
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(p_int_empty).unwrap();
+            // Set rightmost child pointer to p_leaf_child
+            data[8..12].copy_from_slice(&p_leaf_child.to_be_bytes());
+        }
+        // Also insert a row in p_leaf_child
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(p_leaf_child).unwrap();
+            let cell = vec![3, 1, b'a', b'b', b'c'];
+            insert_cell_raw(data, p_leaf_child, &cell, DEFAULT_PAGE_SIZE, 0).unwrap();
+        }
+        let mut cur_empty_int = bt.cursor(p_int_empty, true).unwrap();
+        assert!(cur_empty_int.move_to_first().unwrap());
+        assert!(cur_empty_int.move_to_last().unwrap());
+
+        // Search on completely empty table
+        let p_empty_leaf = bt.allocate_page(PageKind::TableLeaf).unwrap();
+        let mut cur_empty = bt.cursor(p_empty_leaf, true).unwrap();
+        assert_eq!(
+            cur_empty
+                .move_to(&1u64.to_be_bytes(), SeekBias::Ge)
+                .unwrap(),
+            SeekResult::Empty
+        );
+
+        // Load cell on non-leaf / unexpected kind
+        let mut cur_corrupt = bt.cursor(1, true).unwrap();
+        let bad_hdr = PageHeader {
+            kind: PageKind::TableInterior,
+            cell_count: 1,
+            cell_content_start: 1000,
+            rightmost_child: 0,
+            header_offset: 0,
+        };
+        assert!(cur_corrupt
+            .load_cell(&vec![0u8; 4096], &bad_hdr, 0)
+            .is_err());
+
+        // Test insert_cell_raw with full page
+        let mut small_page = vec![0u8; 50];
+        init_page_at(&mut small_page, PageKind::TableInterior, 50, 0);
+        let big_cell = vec![0u8; 40];
+        assert!(insert_cell_raw(&mut small_page, 1, &big_cell, 50, 0).is_err());
+
+        // Test insert_cell_into_page with PageFull
+        assert!(insert_cell_into_page(&bt.pager, p_leaf_child, &vec![0u8; 5000], 999).is_err());
+
+        // Test delete with invalid frame index
+        {
+            let mut cur = bt.cursor(p_int_empty, true).unwrap();
+            cur.state = CursorState::Valid;
+            cur.stack.push(CursorFrame {
+                pgno: p_int_empty,
+                cell_idx: 10,
+            });
+            assert!(cur.delete().is_err());
+        }
+
+        // Test insert_cell_raw
+        {
+            let mut page = vec![0u8; 1024];
+            init_page_at(&mut page, PageKind::TableInterior, 1024, 0);
+            assert!(insert_cell_raw(&mut page, 2, &[1, 2, 3, 4, 5], 1024, 0).is_ok());
+        }
+
+        // Test insert_cell_into_page with ccs == 0 on a smaller page causing Corrupt
+        {
+            let p_zero_ccs = bt.allocate_page(PageKind::TableLeaf).unwrap();
+            {
+                let mut pg = bt.pager.lock().unwrap();
+                let data = pg.write_access(p_zero_ccs).unwrap();
+                data[5..7].copy_from_slice(&[0, 0]); // ccs = 0 -> becomes 65536
+            }
+            assert!(insert_cell_into_page(&bt.pager, p_zero_ccs, &[1, 2, 3], 1).is_err());
+        }
+
+        // Test load_cell error paths
+        {
+            let mut cur = bt.cursor(1, false).unwrap();
+            // 1. cell offset >= data.len()
+            let mut bad_page = vec![0u8; 100];
+            init_page_at(&mut bad_page, PageKind::TableLeaf, 100, 0);
+            bad_page[3..5].copy_from_slice(&1u16.to_be_bytes()); // cell_count = 1
+            bad_page[8..10].copy_from_slice(&200u16.to_be_bytes()); // ptr = 200 >= 100
+            let bad_hdr = PageHeader::parse(&bad_page, 2).unwrap();
+            assert!(cur.load_cell(&bad_page, &bad_hdr, 0).is_err());
+
+            // 2. TableLeaf inline_end > cell.len()
+            bad_page[8..10].copy_from_slice(&50u16.to_be_bytes()); // ptr = 50
+                                                                   // cell at 50: payload_len = 1000 (0x87, 0x68), rowid = 1
+            bad_page[50] = 0x87;
+            bad_page[51] = 0x68;
+            bad_page[52] = 1;
+            assert!(cur.load_cell(&bad_page, &bad_hdr, 0).is_err());
+
+            // 3. IndexLeaf e > cell.len()
+            let mut bad_idx_page = vec![0u8; 100];
+            init_page_at(&mut bad_idx_page, PageKind::IndexLeaf, 100, 0);
+            bad_idx_page[3..5].copy_from_slice(&1u16.to_be_bytes());
+            bad_idx_page[8..10].copy_from_slice(&50u16.to_be_bytes());
+            bad_idx_page[50] = 80; // plen = 80, but remaining is 50-1 = 49 bytes
+            let bad_idx_hdr = PageHeader::parse(&bad_idx_page, 2).unwrap();
+            assert!(cur.load_cell(&bad_idx_page, &bad_idx_hdr, 0).is_err());
+        }
+
+        // Test read_overflow_chain error where 4 + take > page_data.len()
+        {
+            let mut out = Vec::new();
+            // Since read_overflow_chain reads from pager, if we allocate an overflow page,
+            // but pass remaining larger than capacity: it will read normal capacity chunks.
+            let p_ovfl = bt.allocate_page(PageKind::TableLeaf).unwrap();
+            // Chain: p_ovfl has next = 0, data len is 4096.
+            assert!(read_overflow_chain(&bt.pager, p_ovfl, 10, &mut out).is_ok());
+        }
     }
 }
