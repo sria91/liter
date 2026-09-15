@@ -553,6 +553,18 @@ impl<'a> Parser<'a> {
                 self.consume()?;
                 Ok(Expr::Literal(LiteralValue::Null))
             }
+            Some(Token::CurrentDate) => {
+                self.consume()?;
+                Ok(Expr::Literal(LiteralValue::CurrentDate))
+            }
+            Some(Token::CurrentTime) => {
+                self.consume()?;
+                Ok(Expr::Literal(LiteralValue::CurrentTime))
+            }
+            Some(Token::CurrentTimestamp) => {
+                self.consume()?;
+                Ok(Expr::Literal(LiteralValue::CurrentTimestamp))
+            }
             Some(Token::Integer(s)) => {
                 self.consume()?;
                 Ok(Expr::Literal(LiteralValue::Integer(s.parse().unwrap_or(0))))

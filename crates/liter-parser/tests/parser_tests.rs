@@ -348,3 +348,28 @@ fn test_create_table_column_types() {
     assert_eq!(columns[1].type_name.as_ref().unwrap().name, "TEXT");
     assert_eq!(columns[2].type_name.as_ref().unwrap().name, "100");
 }
+
+#[test]
+fn test_parse_datetime_literals() {
+    let sql = "SELECT CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP;";
+    let stmt = parse_stmt(sql).unwrap();
+    let Stmt::Select(s) = stmt else {
+        panic!("expected Select");
+    };
+    let SelectBody::Simple(simple) = s.body else {
+        panic!("expected SelectBody::Simple");
+    };
+    assert_eq!(simple.result_columns.len(), 3);
+    let ResultColumn::Expr { expr: e1, .. } = &simple.result_columns[0] else {
+        panic!("expected Expr");
+    };
+    let ResultColumn::Expr { expr: e2, .. } = &simple.result_columns[1] else {
+        panic!("expected Expr");
+    };
+    let ResultColumn::Expr { expr: e3, .. } = &simple.result_columns[2] else {
+        panic!("expected Expr");
+    };
+    assert!(matches!(e1, Expr::Literal(LiteralValue::CurrentDate)));
+    assert!(matches!(e2, Expr::Literal(LiteralValue::CurrentTime)));
+    assert!(matches!(e3, Expr::Literal(LiteralValue::CurrentTimestamp)));
+}
