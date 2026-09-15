@@ -437,7 +437,10 @@ mod tests {
         let p = alloc.malloc(16);
         assert!(!p.is_null());
         assert_eq!(alloc.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(alloc.bytes.load(std::sync::atomic::Ordering::SeqCst), 16);
         alloc.set_oom_inject(0);
+        alloc.free(p);
+        assert_eq!(alloc.bytes.load(std::sync::atomic::Ordering::SeqCst), 0);
         alloc.reset();
         assert_eq!(alloc.count.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(alloc.bytes.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -447,7 +450,6 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             usize::MAX
         );
-        alloc.free(p);
     }
 
     #[test]

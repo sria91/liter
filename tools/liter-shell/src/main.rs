@@ -76,7 +76,7 @@ pub fn run_session<R: BufRead, W: Write>(
         }
 
         if trimmed.starts_with('.') {
-            handle_dot_command(trimmed, conn, &mut out);
+            handle_dot_command(trimmed, conn, &mut out)?;
             continue;
         }
 
@@ -85,7 +85,7 @@ pub fn run_session<R: BufRead, W: Write>(
         if trimmed.ends_with(';') {
             let sql = sql_buf.trim().to_owned();
             sql_buf.clear();
-            exec_sql(&sql, conn, &mut out, interactive);
+            exec_sql(&sql, conn, &mut out, interactive)?;
         } else if interactive {
             write!(out, "   ...> ")?;
             out.flush()?;
@@ -107,22 +107,33 @@ fn is_returning_sql(sql: &str) -> bool {
     )
 }
 
-fn exec_sql(sql: &str, conn: &liter::Connection, out: &mut impl Write, interactive: bool) {
+fn exec_sql(
+    sql: &str,
+    conn: &liter::Connection,
+    out: &mut impl Write,
+    interactive: bool,
+) -> io::Result<()> {
     if is_returning_sql(sql) {
         match conn.query(sql, [] as [(); 0]) {
             Ok(rows) => {
                 for row in &rows {
                     let cols: Vec<String> = row.iter().map(format_value).collect();
-                    writeln!(out, "{}", cols.join("|")).ok();
+                    writeln!(out, "{}", cols.join("|"))?;
                 }
             }
             Err(liter::SqliteError::NotImplemented) => {
                 if interactive {
-                    writeln!(out, "-- not yet implemented --").ok();
+                    writeln!(out, "-- not yet implemented --")?;
+                } else {
+                    eprintln!("Error: not yet implemented");
+                    return Err(io::Error::other("not yet implemented"));
                 }
             }
             Err(e) => {
                 eprintln!("Error: {e}");
+                if !interactive {
+                    return Err(io::Error::other(e.to_string()));
+                }
             }
         }
     } else {
@@ -130,14 +141,21 @@ fn exec_sql(sql: &str, conn: &liter::Connection, out: &mut impl Write, interacti
             Ok(_) => {}
             Err(liter::SqliteError::NotImplemented) => {
                 if interactive {
-                    writeln!(out, "-- not yet implemented --").ok();
+                    writeln!(out, "-- not yet implemented --")?;
+                } else {
+                    eprintln!("Error: not yet implemented");
+                    return Err(io::Error::other("not yet implemented"));
                 }
             }
             Err(e) => {
                 eprintln!("Error: {e}");
+                if !interactive {
+                    return Err(io::Error::other(e.to_string()));
+                }
             }
         }
     }
+    Ok(())
 }
 
 fn format_value(v: &liter::Value) -> String {
@@ -151,24 +169,25 @@ fn format_value(v: &liter::Value) -> String {
     }
 }
 
-fn handle_dot_command(cmd: &str, _conn: &liter::Connection, mut out: impl Write) {
+fn handle_dot_command(cmd: &str, _conn: &liter::Connection, mut out: impl Write) -> io::Result<()> {
     match cmd {
         ".help" => {
-            writeln!(out, ".help      Show this help").ok();
-            writeln!(out, ".tables    List tables").ok();
-            writeln!(out, ".schema    Show schema").ok();
-            writeln!(out, ".quit      Exit").ok();
+            writeln!(out, ".help      Show this help")?;
+            writeln!(out, ".tables    List tables")?;
+            writeln!(out, ".schema    Show schema")?;
+            writeln!(out, ".quit      Exit")?;
         }
         ".tables" => {
-            writeln!(out, "-- .tables not yet implemented --").ok();
+            writeln!(out, "-- .tables not yet implemented --")?;
         }
         ".schema" => {
-            writeln!(out, "-- .schema not yet implemented --").ok();
+            writeln!(out, "-- .schema not yet implemented --")?;
         }
         _ => {
             eprintln!("Unknown dot-command: {cmd}");
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -214,7 +233,7 @@ mod tests {
         let conn = liter::Connection::open(":memory:").unwrap();
         let mut out = Vec::new();
 
-        handle_dot_command(".help", &conn, &mut out);
+        handle_dot_command(".help", &conn, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains(".help"));
         assert!(s.contains(".tables"));
@@ -222,21 +241,21 @@ mod tests {
         assert!(s.contains(".quit"));
 
         let mut out_tables = Vec::new();
-        handle_dot_command(".tables", &conn, &mut out_tables);
+        handle_dot_command(".tables", &conn, &mut out_tables).unwrap();
         assert_eq!(
             String::from_utf8(out_tables).unwrap(),
             "-- .tables not yet implemented --\n"
         );
 
         let mut out_schema = Vec::new();
-        handle_dot_command(".schema", &conn, &mut out_schema);
+        handle_dot_command(".schema", &conn, &mut out_schema).unwrap();
         assert_eq!(
             String::from_utf8(out_schema).unwrap(),
             "-- .schema not yet implemented --\n"
         );
 
         let mut out_unknown = Vec::new();
-        handle_dot_command(".foobar", &conn, &mut out_unknown);
+        handle_dot_command(".foobar", &conn, &mut out_unknown).unwrap();
         assert!(out_unknown.is_empty());
     }
 
@@ -271,16 +290,35 @@ mod tests {
         let conn = liter::Connection::open(":memory:").unwrap();
         let mut out = Vec::new();
 
-        // Query error
-        exec_sql("SELECT * FROM non_existent_table;", &conn, &mut out, true);
+        // Query error in interactive mode returns Ok(())
+        assert!(exec_sql("SELECT * FROM non_existent_table;", &conn, &mut out, true).is_ok());
 
-        // Execute error
-        exec_sql(
+        // Execute error in interactive mode returns Ok(())
+        assert!(exec_sql(
             "INSERT INTO non_existent_table VALUES (1);",
             &conn,
             &mut out,
             true,
-        );
+        )
+        .is_ok());
+
+        // Non-interactive mode returns Err
+        assert!(exec_sql("SELECT * FROM non_existent_table;", &conn, &mut out, false).is_err());
+        assert!(exec_sql(
+            "INSERT INTO non_existent_table VALUES (1);",
+            &conn,
+            &mut out,
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_run_session_non_interactive_error() {
+        let conn = liter::Connection::open(":memory:").unwrap();
+        let mut out = Vec::new();
+        let input = b"SELECT * FROM nonexistent;\n";
+        assert!(run_session(&input[..], &mut out, &conn, false).is_err());
     }
 
     #[test]
