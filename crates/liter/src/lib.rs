@@ -1268,4 +1268,49 @@ mod tests {
         let res_query = conn.query("SELECT unknown_fn(1)", [] as [(); 0]);
         assert!(res_query.is_err());
     }
+
+    #[test]
+    fn test_current_datetime_literals() {
+        let conn = Connection::open_in_memory().unwrap();
+        let rows = conn
+            .query(
+                "SELECT CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP",
+                [] as [(); 0],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.len(), 3);
+
+        // CURRENT_DATE should be "YYYY-MM-DD"
+        match &row[0] {
+            Value::Text(t) => {
+                let s = std::str::from_utf8(t).unwrap();
+                assert_eq!(s.len(), 10);
+                assert_eq!(s.chars().filter(|c| *c == '-').count(), 2);
+            }
+            other => panic!("expected text for CURRENT_DATE, got {:?}", other),
+        }
+
+        // CURRENT_TIME should be "HH:MM:SS"
+        match &row[1] {
+            Value::Text(t) => {
+                let s = std::str::from_utf8(t).unwrap();
+                assert_eq!(s.len(), 8);
+                assert_eq!(s.chars().filter(|c| *c == ':').count(), 2);
+            }
+            other => panic!("expected text for CURRENT_TIME, got {:?}", other),
+        }
+
+        // CURRENT_TIMESTAMP should be "YYYY-MM-DD HH:MM:SS"
+        match &row[2] {
+            Value::Text(t) => {
+                let s = std::str::from_utf8(t).unwrap();
+                assert_eq!(s.len(), 19);
+                assert_eq!(s.chars().filter(|c| *c == '-').count(), 2);
+                assert_eq!(s.chars().filter(|c| *c == ':').count(), 2);
+            }
+            other => panic!("expected text for CURRENT_TIMESTAMP, got {:?}", other),
+        }
+    }
 }

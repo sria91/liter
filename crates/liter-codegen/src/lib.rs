@@ -1298,30 +1298,57 @@ impl<'a> Compiler<'a> {
                         });
                     }
                     LiteralValue::CurrentDate => {
+                        let r_arg = self.vm.alloc_reg();
+                        self.vm.emit(VdbeOp {
+                            opcode: Opcode::String8,
+                            p1: 0,
+                            p2: r_arg as i32,
+                            p3: 0,
+                            p4: P4::Text(Arc::from("now".to_string().into_boxed_str())),
+                            p5: 0,
+                        });
                         self.vm.emit(VdbeOp {
                             opcode: Opcode::Function,
-                            p1: 0,
-                            p2: 0,
+                            p1: 1,
+                            p2: r_arg as i32,
                             p3: r as i32,
                             p4: P4::Text(Arc::from("date".to_string().into_boxed_str())),
                             p5: 0,
                         });
                     }
                     LiteralValue::CurrentTime => {
+                        let r_arg = self.vm.alloc_reg();
+                        self.vm.emit(VdbeOp {
+                            opcode: Opcode::String8,
+                            p1: 0,
+                            p2: r_arg as i32,
+                            p3: 0,
+                            p4: P4::Text(Arc::from("now".to_string().into_boxed_str())),
+                            p5: 0,
+                        });
                         self.vm.emit(VdbeOp {
                             opcode: Opcode::Function,
-                            p1: 0,
-                            p2: 0,
+                            p1: 1,
+                            p2: r_arg as i32,
                             p3: r as i32,
                             p4: P4::Text(Arc::from("time".to_string().into_boxed_str())),
                             p5: 0,
                         });
                     }
                     LiteralValue::CurrentTimestamp => {
+                        let r_arg = self.vm.alloc_reg();
+                        self.vm.emit(VdbeOp {
+                            opcode: Opcode::String8,
+                            p1: 0,
+                            p2: r_arg as i32,
+                            p3: 0,
+                            p4: P4::Text(Arc::from("now".to_string().into_boxed_str())),
+                            p5: 0,
+                        });
                         self.vm.emit(VdbeOp {
                             opcode: Opcode::Function,
-                            p1: 0,
-                            p2: 0,
+                            p1: 1,
+                            p2: r_arg as i32,
                             p3: r as i32,
                             p4: P4::Text(Arc::from("datetime".to_string().into_boxed_str())),
                             p5: 0,
@@ -2241,12 +2268,15 @@ mod tests {
             .compile_expr(&Expr::Literal(LiteralValue::CurrentTimestamp), None)
             .unwrap();
         assert_eq!(r1, 0);
-        assert_eq!(r2, 1);
-        assert_eq!(r3, 2);
-        assert_eq!(compiler.vm.ops.len(), 3);
-        assert_eq!(compiler.vm.ops[0].opcode, Opcode::Function);
+        assert_eq!(r2, 2);
+        assert_eq!(r3, 4);
+        assert_eq!(compiler.vm.ops.len(), 6);
+        assert_eq!(compiler.vm.ops[0].opcode, Opcode::String8);
         assert_eq!(compiler.vm.ops[1].opcode, Opcode::Function);
-        assert_eq!(compiler.vm.ops[2].opcode, Opcode::Function);
+        assert_eq!(compiler.vm.ops[2].opcode, Opcode::String8);
+        assert_eq!(compiler.vm.ops[3].opcode, Opcode::Function);
+        assert_eq!(compiler.vm.ops[4].opcode, Opcode::String8);
+        assert_eq!(compiler.vm.ops[5].opcode, Opcode::Function);
     }
 
     #[test]
