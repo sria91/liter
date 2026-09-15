@@ -48,6 +48,10 @@ impl WasmConnection {
     pub fn new() -> Result<WasmConnection, String> {
         match Connection::open_in_memory() {
             Ok(conn) => Ok(Self { conn }),
+            // `open_in_memory` only fails today via a `tempfile` creation
+            // error, which itself panics (`.expect(...)`) rather than
+            // returning `Err` — so this arm can't practically be exercised
+            // without a genuine OS-level failure (e.g. no temp dir access).
             Err(e) => Err(e.to_string()),
         }
     }
@@ -125,7 +129,13 @@ impl Connection {
         };
         let schema = liter_schema::Schema::new();
 
-        // Try to load schema from sqlite_schema (root page 1)
+        // Try to load schema from sqlite_schema (root page 1).
+        // `BTree::cursor` never itself fails (it only builds an unpositioned
+        // cursor value), and `cursor.data()` can't fail once `is_valid()`
+        // is true (both just check the same internal state), so neither
+        // `if let Ok(...)` here can actually take its "else" path today —
+        // they're kept as real checks rather than unwraps in case either
+        // cursor's contract changes.
         if let Ok(mut cursor) = btree.cursor(1, false) {
             if cursor.move_to_first().unwrap_or(false) {
                 while cursor.is_valid() {
@@ -148,9 +158,19 @@ impl Connection {
                                     let sql_str = String::from_utf8_lossy(sql);
                                     match liter_parser::parse_stmt(&sql_str) {
                                         Ok(liter_ast::Stmt::Create(create_stmt)) => {
+                                            // The parser only ever
+                                            // constructs `CreateStmt::Table`
+                                            // (no CREATE INDEX/VIEW/TRIGGER
+                                            // support yet), so this is
+                                            // always true today; kept as a
+                                            // real check rather than an
+                                            // unwrap for when that changes.
                                             if let liter_ast::CreateStmt::Table(create_table) =
                                                 *create_stmt
                                             {
+                                                // `CreateTableBody::As` (CREATE TABLE ... AS
+                                                // SELECT) has no parser support yet, so this
+                                                // arm is unreachable until that's implemented.
                                                 let columns = match create_table.body {
                                                     liter_ast::CreateTableBody::Columns {
                                                         columns,
@@ -250,6 +270,11 @@ impl Connection {
         let res = (|| -> SqliteResult<()> {
             while let liter_vdbe::StepResult::Row = vm.step(&self.btree, &mut cursors)? {
                 if is_create {
+                    // CREATE TABLE's compiled program always yields exactly
+                    // one Int result row (the new root page number), so
+                    // neither `if let` here has a genuinely reachable
+                    // "else" today; kept as real checks rather than
+                    // unwraps against future codegen changes.
                     if let Some(row) = vm.current_result_row() {
                         if let Some(pgno) = row[0].to_int() {
                             root_page = Some(pgno as u32);
@@ -272,6 +297,14 @@ impl Connection {
         }
 
         // If it was a CREATE TABLE statement, insert into the schema catalog.
+        //
+        // The two nested checks below are both provably true whenever we
+        // get here rather than genuinely reachable "else" branches:
+        // `is_create` (set from the very same `matches!` check) already
+        // guarantees `ast` is `Stmt::Create`, and the parser only ever
+        // constructs `CreateStmt::Table` (no CREATE INDEX/VIEW/TRIGGER
+        // support yet) — likewise `CreateTableBody::As` below. Kept as real
+        // checks rather than unwraps in case either changes.
         if is_create {
             if let Some(rp) = root_page {
                 if let liter_ast::Stmt::Create(ref create_stmt) = ast {
@@ -325,6 +358,10 @@ impl Connection {
         }
 
         while let liter_vdbe::StepResult::Row = vm.step(&self.btree, &mut cursors)? {
+            // `Vdbe` always sets `last_result_row` in the same opcode
+            // handler that returns `StepResult::Row`, so this is never
+            // actually `None` here; kept as a real check rather than an
+            // unwrap against that invariant changing.
             if let Some(row) = vm.current_result_row() {
                 let mut out_row = Vec::with_capacity(row.len());
                 for mem in row {
@@ -456,6 +493,9 @@ impl Statement<'_> {
             liter_vdbe::StepResult::Row => {
                 // Cache the current row so column_value() can return values
                 // without holding a borrow on `self.vm` simultaneously.
+                // `current_result_row()` is always `Some` here (see the
+                // comment in `query()`), so the `else` is a defensive
+                // fallback rather than a genuinely reachable case.
                 self.column_cache = if let Some(row) = self.vm.current_result_row() {
                     row.iter().map(mem_to_value).collect()
                 } else {
@@ -1080,6 +1120,25 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_dispatches_json_functions() {
+        // `execute()` has its own copy of the func_dispatcher closure
+        // (separate from `query()`'s), so its JSON-routing branch needs its
+        // own coverage independent of the `query()`-based JSON test above.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("SELECT json_extract('{\"a\": 10}', '$.a')", [] as [(); 0])
+            .unwrap();
+        conn.execute("SELECT '{\"a\": 1}' -> '$.a'", [] as [(); 0])
+            .unwrap();
+
+        // `prepare()` has yet another independent copy of the same
+        // closure.
+        let mut stmt = conn
+            .prepare("SELECT json_extract('{\"a\": 10}', '$.a')")
+            .unwrap();
+        assert_eq!(stmt.step().unwrap(), StepResult::Row);
+    }
+
+    #[test]
     fn test_into_params_vec_and_slice() {
         let conn = Connection::open_in_memory().unwrap();
         let slice: &[Value] = &[Value::Int(1)];
@@ -1224,6 +1283,21 @@ mod tests {
             .unwrap();
             cur.insert(&4u64.to_be_bytes(), &rec_index, false).unwrap();
 
+            // 5. type='table' but the stored SQL is CREATE INDEX, which the
+            // parser doesn't support yet — exercises the parse-error
+            // tolerance path (warn + continue) for a corrupt/foreign-syntax
+            // row rather than panicking or aborting the whole schema load.
+            let rec_table_type_non_table_sql = liter_record::encode_record(&[
+                Value::Text(b"table".to_vec()),
+                Value::Text(b"not_really_a_table".to_vec()),
+                Value::Text(b"not_really_a_table".to_vec()),
+                Value::Int(6),
+                Value::Text(b"CREATE INDEX idx3 ON tbl_valid(x)".to_vec()),
+            ])
+            .unwrap();
+            cur.insert(&5u64.to_be_bytes(), &rec_table_type_non_table_sql, false)
+                .unwrap();
+
             conn.btree.commit().unwrap();
         }
 
@@ -1282,35 +1356,27 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row.len(), 3);
 
-        // CURRENT_DATE should be "YYYY-MM-DD"
-        match &row[0] {
-            Value::Text(t) => {
-                let s = std::str::from_utf8(t).unwrap();
-                assert_eq!(s.len(), 10);
-                assert_eq!(s.chars().filter(|c| *c == '-').count(), 2);
+        fn expect_text_str(v: &Value) -> &str {
+            match v {
+                Value::Text(t) => std::str::from_utf8(t).unwrap(),
+                other => panic!("expected text, got {other:?}"),
             }
-            other => panic!("expected text for CURRENT_DATE, got {:?}", other),
         }
+
+        // CURRENT_DATE should be "YYYY-MM-DD"
+        let s = expect_text_str(&row[0]);
+        assert_eq!(s.len(), 10);
+        assert_eq!(s.chars().filter(|c| *c == '-').count(), 2);
 
         // CURRENT_TIME should be "HH:MM:SS"
-        match &row[1] {
-            Value::Text(t) => {
-                let s = std::str::from_utf8(t).unwrap();
-                assert_eq!(s.len(), 8);
-                assert_eq!(s.chars().filter(|c| *c == ':').count(), 2);
-            }
-            other => panic!("expected text for CURRENT_TIME, got {:?}", other),
-        }
+        let s = expect_text_str(&row[1]);
+        assert_eq!(s.len(), 8);
+        assert_eq!(s.chars().filter(|c| *c == ':').count(), 2);
 
         // CURRENT_TIMESTAMP should be "YYYY-MM-DD HH:MM:SS"
-        match &row[2] {
-            Value::Text(t) => {
-                let s = std::str::from_utf8(t).unwrap();
-                assert_eq!(s.len(), 19);
-                assert_eq!(s.chars().filter(|c| *c == '-').count(), 2);
-                assert_eq!(s.chars().filter(|c| *c == ':').count(), 2);
-            }
-            other => panic!("expected text for CURRENT_TIMESTAMP, got {:?}", other),
-        }
+        let s = expect_text_str(&row[2]);
+        assert_eq!(s.len(), 19);
+        assert_eq!(s.chars().filter(|c| *c == '-').count(), 2);
+        assert_eq!(s.chars().filter(|c| *c == ':').count(), 2);
     }
 }

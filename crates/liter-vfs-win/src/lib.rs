@@ -167,7 +167,7 @@ mod platform {
     }
 
     pub fn acquire_lock(file: &File, target: LockLevel, current: LockLevel) -> io::Result<()> {
-        let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
+        let handle = HANDLE(file.as_raw_handle());
         match target {
             LockLevel::Shared if current < LockLevel::Shared => {
                 shared_lock_range(handle, SHARED_FIRST, 1)
@@ -194,7 +194,7 @@ mod platform {
     }
 
     pub fn release_lock(file: &File, target: LockLevel, current: LockLevel) -> io::Result<()> {
-        let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
+        let handle = HANDLE(file.as_raw_handle());
         if current >= LockLevel::Exclusive && target < LockLevel::Exclusive {
             unlock_range(handle, SHARED_FIRST, SHARED_SIZE)?;
             if target >= LockLevel::Shared {
@@ -208,14 +208,22 @@ mod platform {
         if current >= LockLevel::Reserved && target < LockLevel::Reserved {
             unlock_range(handle, RESERVED_BYTE, 1)?;
         }
-        if current >= LockLevel::Shared && target < LockLevel::Shared {
+        // At Exclusive, the single shared byte isn't held separately — it
+        // was released and subsumed into the full-range exclusive lock
+        // above, so unlocking it again here would fail with "already
+        // unlocked". Only unlock it when it's genuinely still held on its
+        // own, i.e. below Exclusive.
+        if current >= LockLevel::Shared
+            && current < LockLevel::Exclusive
+            && target < LockLevel::Shared
+        {
             unlock_range(handle, SHARED_FIRST, 1)?;
         }
         Ok(())
     }
 
     pub fn check_reserved_lock(file: &File) -> io::Result<bool> {
-        let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
+        let handle = HANDLE(file.as_raw_handle());
         // Try a non-blocking exclusive lock on the reserved byte.
         // If it succeeds, nobody holds it → release and return false.
         // If it fails, someone holds it → return true.
@@ -402,6 +410,18 @@ mod tests {
         vfs.delete(&path, false).unwrap();
         assert!(!vfs.access(&path, AccessFlags::EXISTS).unwrap());
     }
+
+    // NOTE: this module intentionally does not test OS-level lock-contention
+    // failure paths (e.g. two handles racing for the same byte range, or
+    // unlocking a range this handle never locked). Two prior attempts at
+    // such tests (asserting `LockFileEx`/`UnlockFile` error behavior)
+    // passed locally on a Windows 11 dev machine but failed on the
+    // `windows-latest` CI runner: real-world Windows lock-manager behavior
+    // for same-process multi-handle contention and for "unlock of an
+    // unlocked range" is not consistent across Windows builds, so asserting
+    // on it is inherently flaky rather than testing a real bug. This
+    // mirrors the equivalent gap documented in `liter-vfs-unix` for
+    // multi-process lock contention.
 
     #[test]
     fn test_vfs_randomness_sleep_and_time() {

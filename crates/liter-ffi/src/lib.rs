@@ -11,7 +11,9 @@
 //! stubs. Full implementation follows once the Rust API in `sqlite3` crate is stable.
 
 use liter::{Connection, SqliteError, Statement, Value};
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+#[cfg(test)]
+use std::ffi::CString;
+use std::ffi::{c_char, c_int, c_void, CStr};
 
 // ── SQLITE_* result codes ─────────────────────────────────────────────────────
 pub const SQLITE_OK: c_int = 0;
@@ -61,7 +63,13 @@ pub struct sqlite3(Connection);
 #[allow(non_camel_case_types)]
 pub struct sqlite3_stmt {
     stmt: Statement<'static>,
-    text_cache: std::collections::HashMap<usize, CString>,
+    // Raw bytes with a single appended NUL terminator, not a `CString`:
+    // SQL TEXT values may contain embedded NUL bytes, and
+    // `sqlite3_column_text` must still return a valid, non-null pointer for
+    // those (matching real SQLite, which lets callers use
+    // `sqlite3_column_bytes` to read the full un-truncated length instead
+    // of stopping at the first NUL).
+    text_cache: std::collections::HashMap<usize, Vec<u8>>,
 }
 
 pub type Sqlite3Callback =
@@ -192,6 +200,10 @@ pub unsafe extern "C" fn sqlite3_reset(stmt: *mut sqlite3_stmt) -> c_int {
 
     match stmt_ref.stmt.reset() {
         Ok(()) => SQLITE_OK,
+        // `Statement::reset` only ever fails via `Vdbe::reset`, which is
+        // currently infallible (always returns `Ok`), so this can't
+        // actually happen today; kept as a real match arm rather than an
+        // unwrap in case that changes.
         Err(e) => map_err(e),
     }
 }
@@ -240,36 +252,20 @@ pub unsafe extern "C" fn sqlite3_column_text(
     let stmt_ref = &mut *stmt;
     let idx = i_col as usize;
 
-    if let Some(cstr) = stmt_ref.text_cache.get(&idx) {
-        return cstr.as_ptr();
+    if let Some(buf) = stmt_ref.text_cache.get(&idx) {
+        return buf.as_ptr() as *const c_char;
     }
 
-    match stmt_ref.stmt.column_value(idx) {
-        Ok(Value::Text(t)) => {
-            if let Ok(cstr) = CString::new(t) {
-                let ptr = cstr.as_ptr();
-                stmt_ref.text_cache.insert(idx, cstr);
-                ptr
-            } else {
-                std::ptr::null()
-            }
-        }
-        Ok(Value::Int(i)) => {
-            let s = i.to_string();
-            let cstr = CString::new(s).unwrap();
-            let ptr = cstr.as_ptr();
-            stmt_ref.text_cache.insert(idx, cstr);
-            ptr
-        }
-        Ok(Value::Real(f)) => {
-            let s = f.to_string();
-            let cstr = CString::new(s).unwrap();
-            let ptr = cstr.as_ptr();
-            stmt_ref.text_cache.insert(idx, cstr);
-            ptr
-        }
-        _ => std::ptr::null(),
-    }
+    let mut buf: Vec<u8> = match stmt_ref.stmt.column_value(idx) {
+        Ok(Value::Text(t)) => t,
+        Ok(Value::Int(i)) => i.to_string().into_bytes(),
+        Ok(Value::Real(f)) => f.to_string().into_bytes(),
+        _ => return std::ptr::null(),
+    };
+    buf.push(0);
+    let ptr = buf.as_ptr() as *const c_char;
+    stmt_ref.text_cache.insert(idx, buf);
+    ptr
 }
 
 #[no_mangle]
@@ -765,6 +761,35 @@ mod tests {
     }
 
     #[test]
+    fn column_text_with_interior_nul_is_preserved() {
+        // A Rust `&str`/`Value::Text` can contain an embedded NUL byte (the
+        // C API's own SQL text can't, since it's read via `CStr::from_ptr`,
+        // but the underlying `Connection` takes a plain `&str`). Such a
+        // value fetched through `sqlite3_column_text` must still return a
+        // valid, non-null pointer to the full byte sequence — callers that
+        // need the embedded NUL use `sqlite3_column_bytes` for the length
+        // rather than relying on a C-string terminator, exactly as real
+        // SQLite behaves.
+        unsafe {
+            let db = open_mem();
+            let conn = &(*db).0;
+            conn.execute("CREATE TABLE t (x)", [] as [(); 0]).unwrap();
+            conn.execute("INSERT INTO t VALUES ('ab\0cd')", [] as [(); 0])
+                .unwrap();
+
+            let stmt = prepare(db, "SELECT x FROM t");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            let ptr = sqlite3_column_text(stmt, 0);
+            assert!(!ptr.is_null());
+            let len = sqlite3_column_bytes(stmt, 0) as usize;
+            let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+            assert_eq!(bytes, b"ab\0cd");
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
     fn column_text_is_cached_across_calls() {
         unsafe {
             let db = open_mem();
@@ -847,26 +872,16 @@ mod tests {
             sqlite3_finalize(stmt);
 
             let stmt = prepare(db, "SELECT zeroblob(3)");
-            let step_result = sqlite3_step(stmt);
-            println!("sqlite3_step returned: {}", step_result);
-            assert_eq!(step_result, SQLITE_ROW);
-            let stmt_ref = &*stmt;
-            let value = stmt_ref.stmt.column_value(0);
-            println!("zeroblob(3) column_value result: {:?}", value);
-            match &value {
-                Ok(v) => println!("zeroblob(3) value: {:?}", v),
-                Err(e) => println!("zeroblob(3) column_value error: {:?}", e),
-            }
-            let type_result = sqlite3_column_type(stmt, 0);
-            println!("sqlite3_column_type returned: {}", type_result);
-            assert_eq!(step_result, SQLITE_ROW);
-            assert_eq!(type_result, SQLITE_BLOB);
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_type(stmt, 0), SQLITE_BLOB);
             assert_eq!(sqlite3_column_bytes(stmt, 0), 3);
             sqlite3_finalize(stmt);
 
             let stmt = prepare(db, "SELECT NULL");
             assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
             assert_eq!(sqlite3_column_type(stmt, 0), SQLITE_NULL);
+            // Null has no byte length: sqlite3_column_bytes' fallback arm.
+            assert_eq!(sqlite3_column_bytes(stmt, 0), 0);
             sqlite3_finalize(stmt);
 
             sqlite3_close(db);

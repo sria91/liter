@@ -114,9 +114,13 @@ impl Mem {
                 }
                 zero_len.cmp(&b2.len())
             }
-            (Mem::Agg(_), _) => Ordering::Equal,
-            (_, Mem::Agg(_)) => Ordering::Equal,
-            _ => Ordering::Equal,
+            // The only same-type-class pair not already listed above is
+            // Agg-vs-Agg (Agg is alone in its type class), and `Mem::Agg`
+            // is an internal aggregate-state pointer with no meaningful
+            // ordering, so it's always treated as equal.
+            (Mem::Agg(_), Mem::Agg(_)) => Ordering::Equal,
+            // `tc1 == tc2` (checked above) rules out every other pairing.
+            _ => unreachable!("mismatched type classes should have returned above"),
         }
     }
 }
@@ -765,6 +769,12 @@ impl Vdbe {
                             Mem::Text(Arc::from(s.as_ref()))
                         }
                         liter_record::Value::Blob(b) => Mem::Blob(Arc::from(b.into_boxed_slice())),
+                        // `liter_record::decode_value` never actually
+                        // produces `Value::ZeroBlob` (there's no serial
+                        // type for it — `encode_record` rejects it too),
+                        // so this arm is unreachable in practice; kept for
+                        // exhaustiveness and in case decode support is
+                        // added later.
                         liter_record::Value::ZeroBlob(n) => Mem::ZeroBlob(n),
                     };
                 }
@@ -1010,6 +1020,9 @@ impl Vdbe {
                                     liter_record::Value::Blob(b) => {
                                         Mem::Blob(Arc::from(b.as_slice()))
                                     }
+                                    // See the comment on the equivalent arm
+                                    // in the Column opcode: decode never
+                                    // actually produces this variant.
                                     liter_record::Value::ZeroBlob(n) => Mem::ZeroBlob(*n),
                                 };
                                 let mem_b = match fb {
@@ -1238,6 +1251,33 @@ mod tests {
     use super::*;
 
     // ── Test helpers ────────────────────────────────────────────────────────
+
+    /// Unwrap a `Mem::Int`, panicking with a descriptive message otherwise.
+    /// Centralizing this (instead of a `match ... => panic!` at every call
+    /// site) means only one line, not a dozen, is a permanently-unreachable
+    /// "should never happen" branch once every call site is well-behaved.
+    fn expect_int(m: &Mem) -> i64 {
+        match m {
+            Mem::Int(i) => *i,
+            other => panic!("expected Mem::Int, got {other:?}"),
+        }
+    }
+
+    /// Unwrap a `Mem::Text`, panicking with a descriptive message otherwise.
+    fn expect_text(m: &Mem) -> Arc<str> {
+        match m {
+            Mem::Text(t) => t.clone(),
+            other => panic!("expected Mem::Text, got {other:?}"),
+        }
+    }
+
+    /// Unwrap a `Mem::Blob`, panicking with a descriptive message otherwise.
+    fn expect_blob(m: &Mem) -> Arc<[u8]> {
+        match m {
+            Mem::Blob(b) => b.clone(),
+            other => panic!("expected Mem::Blob, got {other:?}"),
+        }
+    }
 
     /// Insert `rows` (rowid, text) pairs into the table rooted at `pgno`,
     /// wrapping the write in its own transaction.
@@ -1560,6 +1600,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mem_cmp_agg_is_always_equal() {
+        // `Mem::Agg` is an internal aggregate-state pointer, not a real SQL
+        // value, so it has no meaningful ordering against another Agg (a
+        // different type class than Agg, like Int, is already resolved by
+        // the type-class check before any Agg-specific comparison logic).
+        use std::cmp::Ordering;
+        assert_eq!(Mem::Agg(1).cmp(&Mem::Agg(2)), Ordering::Equal);
+        assert_eq!(Mem::Agg(0).cmp(&Mem::Agg(0)), Ordering::Equal);
+    }
+
     // ── VdbeCursor ──────────────────────────────────────────────────────────
 
     #[test]
@@ -1612,6 +1663,32 @@ mod tests {
         let vm = Vdbe::default();
         assert_eq!(vm.ops.len(), 0);
         assert!(vm.current_result_row().is_none());
+    }
+
+    #[test]
+    fn vdbe_num_result_cols_with_and_without_result_row() {
+        // No ResultRow opcode at all (e.g. an INSERT/UPDATE/DELETE-only
+        // program): zero result columns.
+        let mut vm = Vdbe::with_capacity(4, 1);
+        vm.emit(VdbeOp {
+            opcode: Opcode::Halt,
+            p1: 0,
+            p2: 0,
+            p3: 0,
+            p4: P4::None,
+            p5: 0,
+        });
+        assert_eq!(vm.num_result_cols(), 0);
+
+        vm.emit(VdbeOp {
+            opcode: Opcode::ResultRow,
+            p1: 0,
+            p2: 3,
+            p3: 0,
+            p4: P4::None,
+            p5: 0,
+        });
+        assert_eq!(vm.num_result_cols(), 3);
     }
 
     // ── Control flow ────────────────────────────────────────────────────────
@@ -1941,10 +2018,10 @@ mod tests {
                 p5: 0,
             });
             let err = vm.step(&btree, &mut cursors).unwrap_err();
-            match err {
-                VdbeError::Exec(msg) => assert!(msg.contains(name), "unexpected message: {msg}"),
-                other => panic!("expected Exec error, got {other:?}"),
-            }
+            assert!(
+                matches!(&err, VdbeError::Exec(msg) if msg.contains(name)),
+                "unexpected error: {err:?}"
+            );
         }
 
         for op in [Opcode::DivideInt, Opcode::RemainderInt] {
@@ -2083,10 +2160,7 @@ mod tests {
             p5: 0,
         });
         assert_eq!(vm.step(&btree, &mut cursors).unwrap(), StepResult::Row);
-        let pgno = match vm.current_result_row().unwrap()[0] {
-            Mem::Int(i) => i as u32,
-            _ => panic!("expected int page number"),
-        };
+        let pgno = expect_int(&vm.current_result_row().unwrap()[0]) as u32;
         assert!(pgno > 0);
         btree.commit().unwrap();
 
@@ -2217,10 +2291,8 @@ mod tests {
             p5: 0,
         });
         assert_eq!(vm.step(&btree, &mut cursors).unwrap(), StepResult::Row);
-        match &vm.current_result_row().unwrap()[0] {
-            Mem::Blob(b) => assert!(!b.is_empty()),
-            other => panic!("expected blob, got {other:?}"),
-        }
+        let b = expect_blob(&vm.current_result_row().unwrap()[0]);
+        assert!(!b.is_empty());
     }
 
     /// `ZeroBlob` is a recognized `Mem` variant translated by `MakeRecord`
@@ -2404,6 +2476,28 @@ mod tests {
     }
 
     #[test]
+    fn vdbe_make_record_rejects_zeroblob() {
+        // `liter_record::encode_record` doesn't support serializing
+        // `Value::ZeroBlob` (it's a write-side-only placeholder that would
+        // need to be materialized into a real zero-filled blob first), so
+        // MakeRecord must propagate that as an error rather than silently
+        // producing a malformed record.
+        let mut vm = Vdbe::with_capacity(4, 2);
+        vm.regs[0] = Mem::ZeroBlob(5);
+        let mut cursors: Vec<Option<VdbeCursor>> = vec![];
+        let btree = liter_btree::BTree::new_in_memory();
+        vm.emit(VdbeOp {
+            opcode: Opcode::MakeRecord,
+            p1: 0,
+            p2: 1,
+            p3: 1,
+            p4: P4::None,
+            p5: 0,
+        });
+        assert!(vm.step(&btree, &mut cursors).is_err());
+    }
+
+    #[test]
     fn vdbe_insert_column_rowid_and_scan() {
         let btree = liter_btree::BTree::new_in_memory();
         btree.begin_write().unwrap();
@@ -2474,10 +2568,7 @@ mod tests {
         let mut got = Vec::new();
         while let StepResult::Row = vm.step(&btree, &mut cursors).unwrap() {
             let row = vm.current_result_row().unwrap();
-            let rowid = match row[0] {
-                Mem::Int(i) => i,
-                _ => panic!("expected rowid int"),
-            };
+            let rowid = expect_int(&row[0]);
             assert!(matches!(row[1], Mem::Text(_)));
             got.push(rowid);
         }
@@ -2885,10 +2976,7 @@ mod tests {
 
         let mut got = Vec::new();
         while let StepResult::Row = vm.step(&btree, &mut cursors).unwrap() {
-            got.push(match vm.current_result_row().unwrap()[0] {
-                Mem::Int(i) => i,
-                _ => panic!("expected int"),
-            });
+            got.push(expect_int(&vm.current_result_row().unwrap()[0]));
         }
         assert_eq!(got, vec![3, 2, 1]);
     }
@@ -2963,10 +3051,7 @@ mod tests {
 
         let mut got = Vec::new();
         while let StepResult::Row = vm.step(&btree, &mut cursors).unwrap() {
-            got.push(match vm.current_result_row().unwrap()[0] {
-                Mem::Int(i) => i,
-                _ => panic!("expected int"),
-            });
+            got.push(expect_int(&vm.current_result_row().unwrap()[0]));
         }
         btree.commit().unwrap();
         assert_eq!(got, vec![1, 2, 3]);
@@ -3306,10 +3391,7 @@ mod tests {
 
         let mut got = Vec::new();
         while let StepResult::Row = vm.step(&btree, &mut cursors).unwrap() {
-            got.push(match &vm.current_result_row().unwrap()[0] {
-                Mem::Int(i) => *i,
-                other => panic!("expected int, got {other:?}"),
-            });
+            got.push(expect_int(&vm.current_result_row().unwrap()[0]));
         }
         assert_eq!(got, vec![1, 2, 3]);
     }
@@ -3420,14 +3502,8 @@ mod tests {
         let mut got = Vec::new();
         while let StepResult::Row = vm.step(&btree, &mut cursors).unwrap() {
             let row = vm.current_result_row().unwrap();
-            let val = match row[0] {
-                Mem::Int(i) => i,
-                ref other => panic!("expected int, got {other:?}"),
-            };
-            let text = match &row[1] {
-                Mem::Text(t) => t.to_string(),
-                other => panic!("expected text, got {other:?}"),
-            };
+            let val = expect_int(&row[0]);
+            let text = expect_text(&row[1]).to_string();
             got.push((val, text));
         }
         assert_eq!(
@@ -3518,6 +3594,8 @@ mod tests {
                         p5: 0,
                     });
                 }
+                // Exhaustive over the fixed `kinds` list iterated below;
+                // `match` on `&str` still needs a catch-all arm.
                 other => panic!("unknown kind {other}"),
             }
             vm.emit(VdbeOp {

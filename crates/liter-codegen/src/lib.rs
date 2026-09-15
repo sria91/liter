@@ -634,8 +634,11 @@ impl<'a> Compiler<'a> {
                 }
             }
 
+            // `has_group_by` (required to reach this branch at all) means
+            // `body.group_by` is non-empty, so `group_regs` — and thus
+            // `total_fields` — always has at least one entry.
             let total_fields = group_regs.len() + all_agg_args.len();
-            let record_start = if total_fields > 0 {
+            let record_start = {
                 let start = self.vm.alloc_reg();
                 for _ in 1..total_fields {
                     self.vm.alloc_reg();
@@ -651,8 +654,6 @@ impl<'a> Compiler<'a> {
                     });
                 }
                 start
-            } else {
-                0
             };
 
             let record_reg = self.vm.alloc_reg();
@@ -674,48 +675,52 @@ impl<'a> Compiler<'a> {
             });
         } else {
             for (agg, dest_reg) in &agg_regs_assigned {
-                if let Expr::Function { name, args, .. } = agg {
-                    let mut arg_regs = Vec::new();
-                    let argc = match args {
-                        liter_ast::FunctionArgs::List(exprs)
-                        | liter_ast::FunctionArgs::Distinct(exprs) => {
-                            for e in exprs {
-                                arg_regs
-                                    .push(self.compile_expr(e, Some((cursor_id, &schema_cols)))?);
-                            }
-                            exprs.len()
+                // `agg_regs_assigned` is built from `extract_aggregates`,
+                // which only ever collects `Expr::Function` nodes, so this
+                // always matches; `continue` (never taken) satisfies the
+                // pattern without an unreachable `else` block.
+                let Expr::Function { name, args, .. } = agg else {
+                    continue;
+                };
+                let mut arg_regs = Vec::new();
+                let argc = match args {
+                    liter_ast::FunctionArgs::List(exprs)
+                    | liter_ast::FunctionArgs::Distinct(exprs) => {
+                        for e in exprs {
+                            arg_regs.push(self.compile_expr(e, Some((cursor_id, &schema_cols)))?);
                         }
-                        _ => 0,
-                    };
-                    let arg_start = if argc > 0 {
-                        let start = self.vm.alloc_reg();
-                        for _ in 1..argc {
-                            self.vm.alloc_reg();
-                        }
-                        for (i, &r) in arg_regs.iter().enumerate() {
-                            self.vm.emit(VdbeOp {
-                                opcode: Opcode::Copy,
-                                p1: r as i32,
-                                p2: (start + i) as i32,
-                                p3: 0,
-                                p4: P4::None,
-                                p5: 0,
-                            });
-                        }
-                        start
-                    } else {
-                        0
-                    };
+                        exprs.len()
+                    }
+                    _ => 0,
+                };
+                let arg_start = if argc > 0 {
+                    let start = self.vm.alloc_reg();
+                    for _ in 1..argc {
+                        self.vm.alloc_reg();
+                    }
+                    for (i, &r) in arg_regs.iter().enumerate() {
+                        self.vm.emit(VdbeOp {
+                            opcode: Opcode::Copy,
+                            p1: r as i32,
+                            p2: (start + i) as i32,
+                            p3: 0,
+                            p4: P4::None,
+                            p5: 0,
+                        });
+                    }
+                    start
+                } else {
+                    0
+                };
 
-                    self.vm.emit(VdbeOp {
-                        opcode: Opcode::AggStep,
-                        p1: argc as i32,
-                        p2: arg_start as i32,
-                        p3: *dest_reg as i32,
-                        p4: P4::Text(std::sync::Arc::from(name.as_ref())),
-                        p5: 0,
-                    });
-                }
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::AggStep,
+                    p1: argc as i32,
+                    p2: arg_start as i32,
+                    p3: *dest_reg as i32,
+                    p4: P4::Text(std::sync::Arc::from(name.as_ref())),
+                    p5: 0,
+                });
             }
         }
 
@@ -928,41 +933,44 @@ impl<'a> Compiler<'a> {
 
             let mut arg_col_idx = body.group_by.len();
             for (agg, dest_reg) in &agg_regs_assigned {
-                if let Expr::Function { name, args, .. } = agg {
-                    let argc = match args {
-                        liter_ast::FunctionArgs::List(exprs)
-                        | liter_ast::FunctionArgs::Distinct(exprs) => exprs.len(),
-                        _ => 0,
-                    };
-                    let arg_start = if argc > 0 {
-                        let start = self.vm.alloc_reg();
-                        for _ in 1..argc {
-                            self.vm.alloc_reg();
-                        }
-                        for i in 0..argc {
-                            self.vm.emit(VdbeOp {
-                                opcode: Opcode::Column,
-                                p1: sorter as i32,
-                                p2: (arg_col_idx + i) as i32,
-                                p3: (start + i) as i32,
-                                p4: P4::None,
-                                p5: 0,
-                            });
-                        }
-                        arg_col_idx += argc;
-                        start
-                    } else {
-                        0
-                    };
-                    self.vm.emit(VdbeOp {
-                        opcode: Opcode::AggStep,
-                        p1: argc as i32,
-                        p2: arg_start as i32,
-                        p3: *dest_reg as i32,
-                        p4: P4::Text(std::sync::Arc::from(name.as_ref())),
-                        p5: 0,
-                    });
-                }
+                // See the comment on the equivalent loop above: `agg` is
+                // always `Expr::Function` by construction.
+                let Expr::Function { name, args, .. } = agg else {
+                    continue;
+                };
+                let argc = match args {
+                    liter_ast::FunctionArgs::List(exprs)
+                    | liter_ast::FunctionArgs::Distinct(exprs) => exprs.len(),
+                    _ => 0,
+                };
+                let arg_start = if argc > 0 {
+                    let start = self.vm.alloc_reg();
+                    for _ in 1..argc {
+                        self.vm.alloc_reg();
+                    }
+                    for i in 0..argc {
+                        self.vm.emit(VdbeOp {
+                            opcode: Opcode::Column,
+                            p1: sorter as i32,
+                            p2: (arg_col_idx + i) as i32,
+                            p3: (start + i) as i32,
+                            p4: P4::None,
+                            p5: 0,
+                        });
+                    }
+                    arg_col_idx += argc;
+                    start
+                } else {
+                    0
+                };
+                self.vm.emit(VdbeOp {
+                    opcode: Opcode::AggStep,
+                    p1: argc as i32,
+                    p2: arg_start as i32,
+                    p3: *dest_reg as i32,
+                    p4: P4::Text(std::sync::Arc::from(name.as_ref())),
+                    p5: 0,
+                });
             }
 
             self.vm.emit(VdbeOp {
@@ -1007,6 +1015,11 @@ impl<'a> Compiler<'a> {
                     p5: 0,
                 }));
             }
+            // This mirrors the identical result-column loop above (for the
+            // sorter's group-transition flush): any non-`Expr` column
+            // already returned `NotImplemented` there before compilation
+            // could reach this trailing final-group flush, so the `_` arm
+            // here is unreachable in practice.
             for (i, rc) in body.result_columns.iter().enumerate() {
                 match rc {
                     ResultColumn::Expr { expr, .. } => {

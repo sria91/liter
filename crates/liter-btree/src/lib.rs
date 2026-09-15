@@ -333,6 +333,17 @@ fn init_page_at(data: &mut Vec<u8>, kind: PageKind, page_size: u16, ho: usize) {
     data[ho + 7] = 0; // fragmented free bytes
 }
 
+/// Redistribution plan for splitting a page: (left cells, right cells,
+/// promoted divider rowid, left rightmost-child, right rightmost-child).
+/// The rightmost-child fields are only meaningful for interior splits.
+type SplitPlan<'a> = (
+    &'a [(u64, Vec<u8>)],
+    &'a [(u64, Vec<u8>)],
+    u64,
+    PageNumber,
+    PageNumber,
+);
+
 // ── Cursor frame ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -496,6 +507,48 @@ impl BTreeCursor<'_> {
         self.find_leaf_for_insert(child, rowid)
     }
 
+    /// Find the interior page that holds `divider_rowid` as one of its own
+    /// cells, returning `(pgno, cell_index, cell_count)`.
+    ///
+    /// Used after promoting a divider into a parent (which may have
+    /// cascaded through several levels of splitting) to locate exactly
+    /// where it landed, so the pointer immediately following it can be
+    /// retargeted. `root_page` never moves, so starting from it is always
+    /// valid regardless of how many levels the tree grew in the meantime.
+    fn find_interior_page_with_divider(
+        &self,
+        divider_rowid: u64,
+    ) -> BTreeResult<(PageNumber, u16, u16)> {
+        let mut pgno = self.root_page;
+        for _ in 0..MAX_DEPTH {
+            let pd = self.page(pgno)?;
+            let hdr = PageHeader::parse(&pd, pgno)?;
+            if hdr.kind.is_leaf() {
+                return Err(BTreeError::Corrupt);
+            }
+            let mut lo: u16 = 0;
+            let mut hi = hdr.cell_count;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let r = cell_rowid(&pd, &hdr, mid)?;
+                if divider_rowid <= r {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            if lo < hdr.cell_count && cell_rowid(&pd, &hdr, lo)? == divider_rowid {
+                return Ok((pgno, lo, hdr.cell_count));
+            }
+            pgno = if lo < hdr.cell_count {
+                left_child(&pd, &hdr, lo)?
+            } else {
+                hdr.rightmost_child
+            };
+        }
+        Err(BTreeError::Corrupt)
+    }
+
     /// Delete the entry at the current cursor position.
     ///
     /// After deletion the cursor is repositioned to the next row (if any),
@@ -601,8 +654,12 @@ impl BTreeCursor<'_> {
         let hdr = PageHeader::parse(&raw, leaf_pgno)?;
         let kind = hdr.kind;
         let ho = hdr.header_offset;
+        let orig_rightmost_child = hdr.rightmost_child;
 
-        // Collect (rowid, cell_bytes).
+        // Collect (rowid, cell_bytes). Table-leaf and table-interior cells
+        // have different encodings, so a cascading split of an interior
+        // page (recursing here with `kind == TableInterior` when a parent
+        // page is itself full) must not parse its cells as leaf cells.
         let mut cells: Vec<(u64, Vec<u8>)> = Vec::new();
         for i in 0..hdr.cell_count {
             let off = hdr.cell_ptr(&raw, i)?;
@@ -610,14 +667,26 @@ impl BTreeCursor<'_> {
                 return Err(BTreeError::Corrupt);
             }
             let cell_slice = &raw[off..];
-            let (plen, n1) = get_varint(cell_slice, 0)?;
-            let (_rid, n2) = get_varint(cell_slice, n1)?;
-            let (local_len, has_overflow) = local_payload_size(plen as usize, page_size);
-            let cell_len = n1 + n2 + local_len + if has_overflow { 4 } else { 0 };
+            let (cell_len, rid) = match kind {
+                PageKind::TableLeaf => {
+                    let (plen, n1) = get_varint(cell_slice, 0)?;
+                    let (rid, n2) = get_varint(cell_slice, n1)?;
+                    let (local_len, has_overflow) = local_payload_size(plen as usize, page_size);
+                    let cell_len = n1 + n2 + local_len + if has_overflow { 4 } else { 0 };
+                    (cell_len, rid)
+                }
+                PageKind::TableInterior => {
+                    if cell_slice.len() < 4 {
+                        return Err(BTreeError::Corrupt);
+                    }
+                    let (rid, n2) = get_varint(cell_slice, 4)?;
+                    (4 + n2, rid)
+                }
+                _ => return Err(BTreeError::Corrupt),
+            };
             if cell_len > cell_slice.len() {
                 return Err(BTreeError::Corrupt);
             }
-            let rid = get_varint(cell_slice, n1)?.0;
             cells.push((rid, cell_slice[..cell_len].to_vec()));
         }
 
@@ -625,22 +694,48 @@ impl BTreeCursor<'_> {
         let ins_pos = cells.partition_point(|(r, _)| *r < rowid);
         cells.insert(ins_pos, (rowid, new_cell.to_vec()));
 
-        // Ensure mid is in [1, cells.len()-1] so both halves are non-empty.
-        // For a 1-element split (single large cell), mid=0 puts it all on the left.
-        let mid = if cells.len() == 1 {
-            0 // all 1 cell goes left; right page starts empty but is needed for future inserts
+        // Decide how to redistribute `cells` between the two new pages, and
+        // which rowid gets promoted into the parent as the new divider.
+        //
+        // Leaf pages (B+tree style): every cell stays in a leaf; the divider
+        // is just a routing copy of the first key on the right side.
+        //
+        // Interior pages (true B-tree): each cell pairs a child pointer with
+        // the divider *after* it, plus a separate `rightmost_child` for keys
+        // beyond the last cell. Splitting must promote exactly one divider
+        // to the parent without duplicating its child: that child becomes
+        // the left half's rightmost-child, and the page's *original*
+        // rightmost-child becomes the right half's rightmost-child.
+        let (left_cells, right_cells, divider_rowid, left_rightmost_child, right_rightmost_child): SplitPlan = if kind.is_leaf() {
+            // Ensure mid is in [0, cells.len()-1] so both halves are non-empty.
+            // For a 1-element split (single large cell), mid=0 puts it all on the left.
+            let mid = if cells.len() == 1 {
+                0 // all 1 cell goes left; right page starts empty but is needed for future inserts
+            } else {
+                cells.len().div_ceil(2).min(cells.len() - 1)
+            };
+            // divider_rowid is the first rowid of the right page (cells[mid+1] if splitting evenly,
+            // or cells[mid] when mid puts the last cell on the right).
+            let divider_rowid = if mid < cells.len() - 1 {
+                cells[mid + 1].0
+            } else {
+                cells[mid].0
+            };
+            (&cells[..=mid], &cells[mid + 1..], divider_rowid, 0, 0)
         } else {
-            cells.len().div_ceil(2).min(cells.len() - 1)
-        };
-        // divider_rowid is the first rowid of the right page (cells[mid+1] if splitting evenly,
-        // or cells[mid] when mid puts the last cell on the right).
-        let divider_rowid = if mid < cells.len() - 1 {
-            cells[mid + 1].0
-        } else {
-            cells[mid].0
+            let mid = cells.len() / 2;
+            let divider_rowid = cells[mid].0;
+            let left_rightmost_child = child_pgno_of_interior_cell(&cells[mid].1);
+            (
+                &cells[..mid],
+                &cells[mid + 1..],
+                divider_rowid,
+                left_rightmost_child,
+                orig_rightmost_child,
+            )
         };
 
-        // Allocate the right sibling leaf page.
+        // Allocate the right sibling page.
         let right_pgno = {
             let mut pg = self.btree.pager.lock().unwrap();
             let new_pgno = pg.db_size() + 1;
@@ -663,15 +758,24 @@ impl BTreeCursor<'_> {
             };
 
             // Write cells to left and right children.
-            // Left gets cells[0..=mid], right gets cells[mid+1..].
-            write_cells_to_page(&self.btree.pager, left_pgno, &cells[..=mid], kind, false)?;
-            write_cells_to_page(
+            let left_res = write_cells_to_page(
                 &self.btree.pager,
-                right_pgno,
-                &cells[mid + 1..],
+                left_pgno,
+                left_cells,
                 kind,
                 false,
-            )?;
+                left_rightmost_child,
+            );
+            left_res?;
+            let right_res = write_cells_to_page(
+                &self.btree.pager,
+                right_pgno,
+                right_cells,
+                kind,
+                false,
+                right_rightmost_child,
+            );
+            right_res?;
 
             // Reinitialize the root as an interior page.
             {
@@ -689,7 +793,7 @@ impl BTreeCursor<'_> {
                     .map_err(|e| BTreeError::Record(e.to_string()))?;
                 div_cell.extend_from_slice(&tmp[..vn]);
 
-                insert_cell_raw(data, leaf_pgno, &div_cell, ps, ho)?;
+                insert_cell_raw(data, leaf_pgno, &div_cell, ho)?;
 
                 // rightmost child = right_pgno
                 data[ho + 8] = ((right_pgno >> 24) & 0xFF) as u8;
@@ -699,22 +803,27 @@ impl BTreeCursor<'_> {
             }
         } else {
             // ── Non-root split: redistribute and promote into parent ────────
-            // Rewrite the left page (= leaf_pgno) with cells[0..=mid].
-            write_cells_to_page(
+            // Rewrite the left page (= leaf_pgno) in place.
+            let is_page1 = leaf_pgno == 1;
+            let left_res = write_cells_to_page(
                 &self.btree.pager,
                 leaf_pgno,
-                &cells[..=mid],
+                left_cells,
                 kind,
-                leaf_pgno == 1,
-            )?;
-            // Write cells[mid+1..] to the new sibling.
-            write_cells_to_page(
+                is_page1,
+                left_rightmost_child,
+            );
+            left_res?;
+            // Write the remaining cells to the new sibling.
+            let right_res = write_cells_to_page(
                 &self.btree.pager,
                 right_pgno,
-                &cells[mid + 1..],
+                right_cells,
                 kind,
                 false,
-            )?;
+                right_rightmost_child,
+            );
+            right_res?;
 
             // Find the parent page from the cursor stack.
             let parent_pgno = self
@@ -733,42 +842,53 @@ impl BTreeCursor<'_> {
                 .map_err(|e| BTreeError::Record(e.to_string()))?;
             div_cell.extend_from_slice(&tmp[..vn]);
 
-            // Try to insert the divider cell into the parent.
+            // Try to insert the divider cell into the parent, splitting
+            // (possibly cascading through several levels, and possibly
+            // growing a new root) if it's full.
             match insert_cell_into_page(&self.btree.pager, parent_pgno, &div_cell, divider_rowid) {
-                Ok(()) => {
-                    // Update the rightmost-child or the appropriate child pointer.
-                    // The simplest correct approach: since leaf_pgno is already the
-                    // left child encoded in div_cell, we need right_pgno to be the
-                    // next child. Set rightmost_child to right_pgno if divider is
-                    // the largest key seen so far.
-                    let mut pg = self.btree.pager.lock().unwrap();
-                    let _ps = pg.page_size();
-                    let pho = if parent_pgno == 1 { DB_HEADER_SIZE } else { 0 };
-                    let data = pg.write_access(parent_pgno)?;
-                    let phdr = PageHeader::parse(data, parent_pgno)?;
-                    // The divider was just inserted as the last cell; update rightmost child.
-                    let last_idx = phdr.cell_count.saturating_sub(1);
-                    let last_r = cell_rowid(data, &phdr, last_idx)?;
-                    if last_r == divider_rowid {
-                        data[pho + 8] = ((right_pgno >> 24) & 0xFF) as u8;
-                        data[pho + 9] = ((right_pgno >> 16) & 0xFF) as u8;
-                        data[pho + 10] = ((right_pgno >> 8) & 0xFF) as u8;
-                        data[pho + 11] = (right_pgno & 0xFF) as u8;
-                    }
-                }
+                Ok(()) => {}
                 Err(BTreeError::PageFull) => {
-                    // The parent is also full — need to split the parent.
-                    // Recursively call ourselves on the parent with the divider cell.
-                    // Remove leaf_pgno from the stack so we don't loop.
+                    // Remove leaf_pgno from the stack so the recursive call
+                    // doesn't try to treat it as its own parent.
                     if let Some(pos) = self.stack.iter().position(|f| f.pgno == leaf_pgno) {
                         self.stack.remove(pos);
                     }
                     self.split_and_insert_at(parent_pgno, divider_rowid, &div_cell, page_size)?;
-                    // After parent split, update rightmost child of the new parent cell.
-                    // For simplicity in Phase 2: the right_pgno update is handled on
-                    // next traversal (the structure is valid; right_pgno is reachable).
                 }
                 Err(e) => return Err(e),
+            }
+
+            // Wherever (leaf_pgno, divider_rowid) ended up — the immediate
+            // parent, or an ancestor if the insert above cascaded — it
+            // covers the range that used to be the *tail* of whatever range
+            // leaf_pgno covered before this split. Whichever existing
+            // pointer used to represent that tail — either the next cell
+            // after the divider, or that page's rightmost-child if the
+            // divider landed last — must now point at right_pgno instead of
+            // leaf_pgno.
+            let (target_pgno, idx, cell_count) =
+                self.find_interior_page_with_divider(divider_rowid)?;
+            let mut pg = self.btree.pager.lock().unwrap();
+            let pho = if target_pgno == 1 { DB_HEADER_SIZE } else { 0 };
+            let data = pg.write_access(target_pgno)?;
+            let phdr = PageHeader::parse(data, target_pgno)?;
+            if idx + 1 < cell_count {
+                let off = phdr.cell_ptr(data, idx + 1)?;
+                // Defensive: in a consistent tree this can't actually
+                // happen, because `insert_cell_into_page`'s sort scan only
+                // places a new cell immediately before a *successfully*
+                // read neighbor (i.e. one it could compare rowids
+                // against) — that neighbor becomes `idx + 1` here and was
+                // therefore already known to satisfy this same bound.
+                // Kept as a hard guard (rather than only a debug_assert)
+                // in case that invariant is ever violated by a future
+                // change or genuine on-disk corruption.
+                if off + 4 > data.len() {
+                    return Err(BTreeError::Corrupt);
+                }
+                data[off..off + 4].copy_from_slice(&right_pgno.to_be_bytes());
+            } else {
+                data[pho + 8..pho + 12].copy_from_slice(&right_pgno.to_be_bytes());
             }
         }
 
@@ -1112,10 +1232,9 @@ fn insert_cell_into_page(
     let ho = hdr.header_offset;
     let hs = hdr.kind.header_size();
     let cc = hdr.cell_count;
-    let mut ccs = hdr.cell_content_start as usize;
-    if ccs == 0 {
-        ccs = 65536;
-    }
+    // `cell_content_start` is never 0 here: `PageHeader::parse` normalizes a
+    // raw 0 (SQLite's "start = 65536" sentinel) before this point.
+    let ccs = hdr.cell_content_start as usize;
 
     let ptr_end = ho + hs + (cc as usize + 1) * 2;
     if ccs < ptr_end + cell.len() {
@@ -1129,21 +1248,19 @@ fn insert_cell_into_page(
     }
     data[new_ccs..new_ccs + cell.len()].copy_from_slice(cell);
 
-    // Sorted insertion position by rowid.
+    // Sorted insertion position by rowid. Table-leaf and table-interior
+    // cells are encoded differently (interior cells start with a raw 4-byte
+    // child pointer, not a payload-length varint), so this must go through
+    // `cell_rowid`, which already dispatches on `hdr.kind`, rather than
+    // blindly decoding two leading varints as if every page were a leaf.
     let mut ins = cc;
     for i in 0..cc {
-        let p = ho + hs + i as usize * 2;
-        let cell_off = u16::from_be_bytes([data[p], data[p + 1]]) as usize;
-        if cell_off < data.len() {
-            let c = &data[cell_off..];
-            if let Ok((_, n1)) = decode_varint(c) {
-                if let Ok((r, _)) = decode_varint(&c[n1..]) {
-                    if rowid <= r {
-                        ins = i;
-                        break;
-                    }
-                }
+        match cell_rowid(data, &hdr, i) {
+            Ok(r) if rowid <= r => {
+                ins = i;
+                break;
             }
+            _ => {}
         }
     }
 
@@ -1164,20 +1281,13 @@ fn insert_cell_into_page(
 }
 
 /// Low-level raw cell insert (no rowid sort; used when building interior pages).
-fn insert_cell_raw(
-    data: &mut [u8],
-    pgno: PageNumber,
-    cell: &[u8],
-    page_size: u16,
-    ho: usize,
-) -> BTreeResult<()> {
+fn insert_cell_raw(data: &mut [u8], pgno: PageNumber, cell: &[u8], ho: usize) -> BTreeResult<()> {
     let hdr = PageHeader::parse(data, pgno)?;
     let hs = hdr.kind.header_size();
     let cc = hdr.cell_count;
-    let mut ccs = hdr.cell_content_start as usize;
-    if ccs == 0 {
-        ccs = page_size as usize;
-    }
+    // `cell_content_start` is never 0 here: `PageHeader::parse` normalizes a
+    // raw 0 (SQLite's "start = 65536" sentinel) before this point.
+    let ccs = hdr.cell_content_start as usize;
 
     let ptr_end = ho + hs + (cc as usize + 1) * 2;
     if ccs < ptr_end + cell.len() {
@@ -1203,24 +1313,37 @@ fn insert_cell_raw(
 }
 
 /// Rewrite an entire page with a new set of cells (used after splitting).
+/// `rightmost_child` is only meaningful (and only written) for interior
+/// pages: it's the child pointer for keys beyond the last cell, which has no
+/// leaf-page equivalent.
 fn write_cells_to_page(
     pager: &Arc<Mutex<Pager>>,
     pgno: PageNumber,
     cells: &[(u64, Vec<u8>)],
     kind: PageKind,
     is_page1: bool,
+    rightmost_child: PageNumber,
 ) -> BTreeResult<()> {
     let mut pg = pager.lock().unwrap();
     let ps = pg.page_size();
     let data = pg.write_access(pgno)?;
     let ho = if is_page1 { DB_HEADER_SIZE } else { 0 };
     init_page_at(data, kind, ps, ho);
+    if !kind.is_leaf() {
+        data[ho + 8..ho + 12].copy_from_slice(&rightmost_child.to_be_bytes());
+    }
     drop(pg);
 
     for (rowid, cell) in cells {
         insert_cell_into_page(pager, pgno, cell, *rowid)?;
     }
     Ok(())
+}
+
+/// Extract the 4-byte big-endian child pointer from the front of a raw
+/// table-interior cell (`[child_pgno][divider rowid varint]`).
+fn child_pgno_of_interior_cell(cell: &[u8]) -> PageNumber {
+    u32::from_be_bytes(cell[0..4].try_into().unwrap())
 }
 
 /// Insert a divider cell into a parent interior page to point to `right_pgno`.
@@ -1246,7 +1369,6 @@ fn insert_interior_divider(
     div_cell.extend_from_slice(&tmp[..vn]);
 
     let mut pg = pager.lock().unwrap();
-    let ps = pg.page_size();
     let ho = if parent_pgno == 1 { DB_HEADER_SIZE } else { 0 };
     let data = pg.write_access(parent_pgno)?;
     let hdr = PageHeader::parse(data, parent_pgno)?;
@@ -1254,7 +1376,7 @@ fn insert_interior_divider(
     // Check whether we need to update the rightmost child pointer.
     let is_rightmost = divider_rowid >= cell_rowid_for_last_interior(data, &hdr).unwrap_or(0);
 
-    insert_cell_raw(data, parent_pgno, &div_cell, ps, ho)?;
+    insert_cell_raw(data, parent_pgno, &div_cell, ho)?;
 
     if is_rightmost {
         // The new right sibling becomes the rightmost child.
@@ -1298,6 +1420,14 @@ mod tests {
         let hdr = PageHeader::parse(&arc, 1).unwrap();
         assert_eq!(hdr.kind, PageKind::TableLeaf);
         assert_eq!(hdr.cell_count, 0);
+    }
+
+    #[test]
+    fn move_to_first_on_empty_leaf_returns_false() {
+        let bt = new_bt();
+        let mut cur = bt.cursor(1, true).unwrap();
+        assert!(!cur.move_to_first().unwrap());
+        assert!(!cur.is_valid());
     }
 
     #[test]
@@ -1727,7 +1857,7 @@ mod tests {
             let data = pg.write_access(p_idx).unwrap();
             // Create a small index leaf cell: [varint plen = 4][payload = 1, 2, 3, 4]
             let cell = vec![4u8, 0xAA, 0xBB, 0xCC, 0xDD];
-            insert_cell_raw(data, p_idx, &cell, DEFAULT_PAGE_SIZE, 0).unwrap();
+            insert_cell_raw(data, p_idx, &cell, 0).unwrap();
         }
 
         let mut cur = bt.cursor(p_idx, false).unwrap();
@@ -1781,7 +1911,7 @@ mod tests {
             let mut pg = bt.pager.lock().unwrap();
             let data = pg.write_access(p_idx).unwrap();
             let cell = vec![2u8, 0x11, 0x22];
-            insert_cell_raw(data, p_idx, &cell, DEFAULT_PAGE_SIZE, 0).unwrap();
+            insert_cell_raw(data, p_idx, &cell, 0).unwrap();
         }
         cur.move_to_first().unwrap();
         assert!(cur.rowid().is_err());
@@ -1810,7 +1940,7 @@ mod tests {
             let mut pg = bt.pager.lock().unwrap();
             let data = pg.write_access(p_int).unwrap();
             let cell = vec![1, 2, 3]; // shorter than 5 bytes
-            insert_cell_raw(data, p_int, &cell, DEFAULT_PAGE_SIZE, 0).unwrap();
+            insert_cell_raw(data, p_int, &cell, 0).unwrap();
         }
         {
             let mut pg = bt.pager.lock().unwrap();
@@ -1833,7 +1963,7 @@ mod tests {
             let mut pg = bt.pager.lock().unwrap();
             let data = pg.write_access(p_leaf_child).unwrap();
             let cell = vec![3, 1, b'a', b'b', b'c'];
-            insert_cell_raw(data, p_leaf_child, &cell, DEFAULT_PAGE_SIZE, 0).unwrap();
+            insert_cell_raw(data, p_leaf_child, &cell, 0).unwrap();
         }
         let mut cur_empty_int = bt.cursor(p_int_empty, true).unwrap();
         assert!(cur_empty_int.move_to_first().unwrap());
@@ -1862,11 +1992,17 @@ mod tests {
             .load_cell(&vec![0u8; 4096], &bad_hdr, 0)
             .is_err());
 
-        // Test insert_cell_raw with full page
-        let mut small_page = vec![0u8; 50];
-        init_page_at(&mut small_page, PageKind::TableInterior, 50, 0);
-        let big_cell = vec![0u8; 40];
-        assert!(insert_cell_raw(&mut small_page, 1, &big_cell, 50, 0).is_err());
+        // Test insert_cell_raw with full page. Uses pgno=2 (not 1) so the
+        // internal PageHeader::parse header-offset calculation matches the
+        // page's actual (small) size instead of failing on the 100-byte
+        // reserved header page 1 would otherwise require.
+        let mut small_page = vec![0u8; 20];
+        init_page_at(&mut small_page, PageKind::TableInterior, 20, 0);
+        let big_cell = vec![0u8; 10];
+        assert!(matches!(
+            insert_cell_raw(&mut small_page, 2, &big_cell, 0),
+            Err(BTreeError::PageFull)
+        ));
 
         // Test insert_cell_into_page with PageFull
         assert!(insert_cell_into_page(&bt.pager, p_leaf_child, &vec![0u8; 5000], 999).is_err());
@@ -1886,7 +2022,7 @@ mod tests {
         {
             let mut page = vec![0u8; 1024];
             init_page_at(&mut page, PageKind::TableInterior, 1024, 0);
-            assert!(insert_cell_raw(&mut page, 2, &[1, 2, 3, 4, 5], 1024, 0).is_ok());
+            assert!(insert_cell_raw(&mut page, 2, &[1, 2, 3, 4, 5], 0).is_ok());
         }
 
         // Test insert_cell_into_page with ccs == 0 on a smaller page causing Corrupt
@@ -1929,14 +2065,373 @@ mod tests {
             assert!(cur.load_cell(&bad_idx_page, &bad_idx_hdr, 0).is_err());
         }
 
-        // Test read_overflow_chain error where 4 + take > page_data.len()
+        // Test read_overflow_chain error where 4 + take > page_data.len().
+        // Truncate the page's raw storage below the declared page size so
+        // the 4-byte next-pointer plus the requested bytes don't fit.
         {
             let mut out = Vec::new();
-            // Since read_overflow_chain reads from pager, if we allocate an overflow page,
-            // but pass remaining larger than capacity: it will read normal capacity chunks.
             let p_ovfl = bt.allocate_page(PageKind::TableLeaf).unwrap();
-            // Chain: p_ovfl has next = 0, data len is 4096.
-            assert!(read_overflow_chain(&bt.pager, p_ovfl, 10, &mut out).is_ok());
+            {
+                let mut pg = bt.pager.lock().unwrap();
+                let data = pg.write_access(p_ovfl).unwrap();
+                data.truncate(6); // next-ptr (4 bytes) + 2 bytes of data only
+            }
+            assert!(read_overflow_chain(&bt.pager, p_ovfl, 10, &mut out).is_err());
+        }
+    }
+
+    #[test]
+    fn cell_rowid_errors_when_pointer_targets_out_of_bounds_offset() {
+        // The cell-pointer array entry itself is in-bounds, but the offset it
+        // encodes points past the end of the page's data — cell_rowid must
+        // reject this instead of indexing out of bounds.
+        let bt = new_bt();
+        let pgno = bt.allocate_page(PageKind::TableLeaf).unwrap();
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(pgno).unwrap();
+            insert_cell_raw(data, pgno, &[1, 1], 0).unwrap();
+            // Corrupt the first (and only) cell pointer to point past data.len().
+            let hdr = PageHeader::parse(data, pgno).unwrap();
+            let ptr_off = hdr.header_offset + hdr.kind.header_size();
+            data[ptr_off..ptr_off + 2].copy_from_slice(&0xFFFFu16.to_be_bytes());
+        }
+        let mut pg = bt.pager.lock().unwrap();
+        let data = pg.acquire(pgno).unwrap();
+        let hdr = PageHeader::parse(&data, pgno).unwrap();
+        assert!(cell_rowid(&data, &hdr, 0).is_err());
+    }
+
+    #[test]
+    fn left_child_errors_when_pointer_targets_out_of_bounds_offset() {
+        let bt = new_bt();
+        let pgno = bt.allocate_page(PageKind::TableInterior).unwrap();
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(pgno).unwrap();
+            insert_cell_raw(data, pgno, &[0, 0, 0, 1, 1], 0).unwrap();
+            let hdr = PageHeader::parse(data, pgno).unwrap();
+            let ptr_off = hdr.header_offset + hdr.kind.header_size();
+            // Point the pointer at the last 2 bytes of the page, leaving no
+            // room for the 4-byte child pointer that left_child reads.
+            let near_end = (data.len() - 2) as u16;
+            data[ptr_off..ptr_off + 2].copy_from_slice(&near_end.to_be_bytes());
+        }
+        let mut pg = bt.pager.lock().unwrap();
+        let data = pg.acquire(pgno).unwrap();
+        let hdr = PageHeader::parse(&data, pgno).unwrap();
+        assert!(left_child(&data, &hdr, 0).is_err());
+    }
+
+    #[test]
+    fn load_cell_overflow_pointer_truncated_is_corrupt() {
+        // TableLeaf cell whose declared payload overflows (plen > max_local,
+        // so local_payload_size returns has_overflow = true) but the cell
+        // bytes end before the 4-byte overflow-page pointer.
+        //
+        // `load_cell` reads the *pager's* configured page size (here
+        // DEFAULT_PAGE_SIZE, from `new_bt()`) to compute max_local, not the
+        // length of whatever buffer is passed in, so this must use a
+        // same-sized buffer and a payload length that actually exceeds
+        // DEFAULT_PAGE_SIZE's max_local for the overflow branch to trigger.
+        let bt = new_bt();
+        let mut cur = bt.cursor(1, false).unwrap();
+        let ps = DEFAULT_PAGE_SIZE as usize;
+        let max_local = ps - 35;
+        let plen = (max_local + 1) as u64;
+
+        let mut cell = Vec::new();
+        let mut tmp = [0u8; 9];
+        let n1 = encode_varint(plen, &mut tmp).unwrap();
+        cell.extend_from_slice(&tmp[..n1]);
+        let n2 = encode_varint(1u64, &mut tmp).unwrap(); // rowid = 1
+        cell.extend_from_slice(&tmp[..n2]);
+        let (local_len, has_overflow) = local_payload_size(plen as usize, DEFAULT_PAGE_SIZE);
+        assert!(has_overflow);
+        let s = n1 + n2;
+        // Place the cell so exactly 2 bytes remain after its inline
+        // portion — enough to pass the inline-length check, not enough for
+        // the 4-byte overflow pointer that must follow it.
+        let cell_len_on_page = s + local_len + 2;
+        let off = ps - cell_len_on_page;
+
+        let mut bad_page = vec![0u8; ps];
+        init_page_at(&mut bad_page, PageKind::TableLeaf, DEFAULT_PAGE_SIZE, 0);
+        bad_page[3..5].copy_from_slice(&1u16.to_be_bytes()); // cell_count = 1
+        bad_page[8..10].copy_from_slice(&(off as u16).to_be_bytes());
+        bad_page[off..off + cell.len()].copy_from_slice(&cell);
+
+        let bad_hdr = PageHeader::parse(&bad_page, 2).unwrap();
+        assert!(matches!(
+            cur.load_cell(&bad_page, &bad_hdr, 0),
+            Err(BTreeError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn insert_propagates_non_page_full_errors() {
+        // Corrupt page 1's declared cell-content-start to 0 (which
+        // PageHeader::parse normalizes to 65536, larger than the actual
+        // page). find_leaf_for_insert only reads the kind/cell_count, which
+        // are still valid, so it happily returns this leaf; but
+        // insert_cell_into_page's own `new_ccs + cell.len() > ps` check
+        // must then fail with Corrupt (not PageFull), and insert() must
+        // propagate that instead of attempting a split.
+        let bt = new_bt();
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(1).unwrap();
+            data[105..107].copy_from_slice(&[0, 0]); // cell_content_start = 0 -> 65536
+        }
+        let mut cur = bt.cursor(1, true).unwrap();
+        let result = cur.insert(&1u64.to_be_bytes(), b"x", false);
+        assert!(matches!(result, Err(BTreeError::Corrupt)));
+    }
+
+    #[test]
+    fn split_and_insert_at_rejects_corrupt_source_cells() {
+        let bt = new_bt();
+        // Case 1: a cell pointer pointing past the end of the page data.
+        {
+            let pgno = bt.allocate_page(PageKind::TableLeaf).unwrap();
+            {
+                let mut pg = bt.pager.lock().unwrap();
+                let data = pg.write_access(pgno).unwrap();
+                insert_cell_raw(data, pgno, &[1, 1], 0).unwrap();
+                let hdr = PageHeader::parse(data, pgno).unwrap();
+                let ptr_off = hdr.header_offset + hdr.kind.header_size();
+                data[ptr_off..ptr_off + 2].copy_from_slice(&0xFFFFu16.to_be_bytes());
+            }
+            let mut cur = bt.cursor(pgno, true).unwrap();
+            let new_cell = vec![2u8, 2];
+            assert!(matches!(
+                cur.split_and_insert_at(pgno, 2, &new_cell, DEFAULT_PAGE_SIZE),
+                Err(BTreeError::Corrupt)
+            ));
+        }
+        // Case 2: a cell whose declared varint lengths exceed the actual
+        // bytes remaining in the page.
+        {
+            let pgno = bt.allocate_page(PageKind::TableLeaf).unwrap();
+            {
+                let mut pg = bt.pager.lock().unwrap();
+                let data = pg.write_access(pgno).unwrap();
+                // payload_len = 200 (needs 2-byte varint), rowid = 1, but no
+                // payload bytes actually follow.
+                insert_cell_raw(data, pgno, &[0xC8, 0x01, 1], 0).unwrap();
+            }
+            let mut cur = bt.cursor(pgno, true).unwrap();
+            let new_cell = vec![2u8, 2];
+            assert!(matches!(
+                cur.split_and_insert_at(pgno, 2, &new_cell, DEFAULT_PAGE_SIZE),
+                Err(BTreeError::Corrupt)
+            ));
+        }
+        // Case 3: a table-interior cell shorter than the 4-byte child
+        // pointer it must start with.
+        {
+            let pgno = bt.allocate_page(PageKind::TableInterior).unwrap();
+            {
+                let mut pg = bt.pager.lock().unwrap();
+                let data = pg.write_access(pgno).unwrap();
+                insert_cell_raw(data, pgno, &[1, 2, 3], 0).unwrap();
+            }
+            let mut cur = bt.cursor(pgno, true).unwrap();
+            let new_cell = vec![0, 0, 0, 9, 2];
+            assert!(matches!(
+                cur.split_and_insert_at(pgno, 2, &new_cell, DEFAULT_PAGE_SIZE),
+                Err(BTreeError::Corrupt)
+            ));
+        }
+        // Case 4: an index page (not a table page) has no defined cell
+        // encoding for this table-only split logic.
+        {
+            let pgno = bt.allocate_page(PageKind::IndexLeaf).unwrap();
+            {
+                let mut pg = bt.pager.lock().unwrap();
+                let data = pg.write_access(pgno).unwrap();
+                insert_cell_raw(data, pgno, &[1, 0xAA], 0).unwrap();
+            }
+            let mut cur = bt.cursor(pgno, true).unwrap();
+            let new_cell = vec![1u8, 0xBB];
+            assert!(matches!(
+                cur.split_and_insert_at(pgno, 2, &new_cell, DEFAULT_PAGE_SIZE),
+                Err(BTreeError::Corrupt)
+            ));
+        }
+    }
+
+    #[test]
+    fn find_interior_page_with_divider_rejects_a_leaf_root() {
+        let bt = new_bt(); // page 1 is a TableLeaf
+        let cur = bt.cursor(1, true).unwrap();
+        assert!(matches!(
+            cur.find_interior_page_with_divider(42),
+            Err(BTreeError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn split_and_insert_at_propagates_parent_insert_errors() {
+        // Promoting a divider into a parent whose own page state is corrupt
+        // (not merely full) must propagate that error instead of treating
+        // it as a cascading split.
+        let bt = new_bt();
+        let parent = bt.allocate_page(PageKind::TableInterior).unwrap();
+        let leaf = bt.allocate_page(PageKind::TableLeaf).unwrap();
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(parent).unwrap();
+            // Corrupt cell_content_start to 0 -> normalizes to 65536,
+            // larger than the real page, so inserting into `parent`
+            // fails with Corrupt rather than PageFull.
+            data[5..7].copy_from_slice(&[0, 0]);
+        }
+        {
+            let mut pg = bt.pager.lock().unwrap();
+            let data = pg.write_access(leaf).unwrap();
+            // A well-formed table-leaf cell: payload_len=1, rowid=24, 1
+            // payload byte. Must be exactly this size (not shorter, relying
+            // on trailing zero padding) because it's the first cell in a
+            // fresh page, so it's placed flush against the end of the page
+            // with nothing after it to pad into.
+            insert_cell_raw(data, leaf, &[1, 24, 0], 0).unwrap();
+        }
+        let mut cur = bt.cursor(parent, true).unwrap();
+        cur.stack.push(CursorFrame {
+            pgno: parent,
+            cell_idx: 0,
+        });
+        cur.stack.push(CursorFrame {
+            pgno: leaf,
+            cell_idx: 0,
+        });
+        let new_cell = vec![1u8, 26, 0];
+        assert!(matches!(
+            cur.split_and_insert_at(leaf, 26, &new_cell, DEFAULT_PAGE_SIZE),
+            Err(BTreeError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn insert_cell_into_page_inserts_before_existing_cells() {
+        // Insert rows out of ascending order so insert_cell_into_page must
+        // take the "insert before an existing cell" branch instead of always
+        // appending at the end.
+        let bt = new_bt();
+        let mut cur = bt.cursor(1, true).unwrap();
+        for rowid in [10u64, 5, 20, 1, 15, 8] {
+            cur.insert(&rowid.to_be_bytes(), b"v", false).unwrap();
+        }
+        let mut found = Vec::new();
+        cur.move_to_first().unwrap();
+        while cur.is_valid() {
+            found.push(u64::from_be_bytes(cur.key().unwrap().try_into().unwrap()));
+            cur.next().unwrap();
+        }
+        assert_eq!(found, vec![1, 5, 8, 10, 15, 20]);
+    }
+
+    #[test]
+    fn cascading_interior_split_promotes_through_multiple_levels() {
+        // Use a small (minimum) page size so a modest number of rows is
+        // enough to fill not just leaf pages but the interior root page
+        // too, forcing split_and_insert_at's recursive "parent is also
+        // full" path (a cascading split that itself creates a new root).
+        use liter_pager::MIN_PAGE_SIZE;
+        let bt = {
+            use std::io::Write;
+            let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+            let path = tmp.path().to_owned();
+            tmp.flush().ok();
+            let pager = Pager::open(&path, MIN_PAGE_SIZE, false).expect("pager");
+            let bt = BTree {
+                pager: Arc::new(Mutex::new(pager)),
+                _tempfile: Some(Box::new(tmp)),
+                meta: [0u32; 16],
+            };
+            bt.begin_write().unwrap();
+            bt.allocate_page(PageKind::TableLeaf).unwrap();
+            bt
+        };
+        let mut cur = bt.cursor(1, true).unwrap();
+        let payload = vec![0xAB; 4];
+        for rowid in 1u64..=20_000 {
+            cur.insert(&rowid.to_be_bytes(), &payload, false).unwrap();
+        }
+        cur.move_to_first().unwrap();
+        let mut count = 0u64;
+        while cur.is_valid() {
+            let key = u64::from_be_bytes(cur.key().unwrap().try_into().unwrap());
+            count += 1;
+            assert_eq!(key, count, "forward traversal out of order at {count}");
+            cur.next().unwrap();
+        }
+        assert_eq!(count, 20_000);
+    }
+
+    #[test]
+    fn cascading_interior_split_with_shuffled_insert_order() {
+        // Ascending-order inserts always split at the tree's right edge, so
+        // the promoted divider always lands as the *last* cell in its
+        // parent (or a new page's rightmost-child). Shuffling the insert
+        // order forces splits (and cascading interior splits) in the middle
+        // of the tree too, exercising the general "find wherever the
+        // divider landed and retarget the next pointer" path rather than
+        // only the rightmost-child special case.
+        use liter_pager::MIN_PAGE_SIZE;
+        let bt = {
+            use std::io::Write;
+            let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+            let path = tmp.path().to_owned();
+            tmp.flush().ok();
+            let pager = Pager::open(&path, MIN_PAGE_SIZE, false).expect("pager");
+            let bt = BTree {
+                pager: Arc::new(Mutex::new(pager)),
+                _tempfile: Some(Box::new(tmp)),
+                meta: [0u32; 16],
+            };
+            bt.begin_write().unwrap();
+            bt.allocate_page(PageKind::TableLeaf).unwrap();
+            bt
+        };
+
+        // Deterministic pseudo-shuffle (xorshift64) of 1..=N, no external
+        // `rand` dependency needed.
+        const N: u64 = 20_000;
+        let mut rowids: Vec<u64> = (1..=N).collect();
+        let mut state: u64 = 0x2545F4914F6CDD1D;
+        for i in (1..rowids.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let j = (state % (i as u64 + 1)) as usize;
+            rowids.swap(i, j);
+        }
+
+        let mut cur = bt.cursor(1, true).unwrap();
+        let payload = vec![0xCD; 4];
+        for &rowid in &rowids {
+            cur.insert(&rowid.to_be_bytes(), &payload, false).unwrap();
+        }
+
+        cur.move_to_first().unwrap();
+        let mut count = 0u64;
+        while cur.is_valid() {
+            let key = u64::from_be_bytes(cur.key().unwrap().try_into().unwrap());
+            count += 1;
+            assert_eq!(key, count, "forward traversal out of order at {count}");
+            cur.next().unwrap();
+        }
+        assert_eq!(count, N);
+
+        // Every inserted row must also be independently seekable.
+        for rowid in [1u64, N / 2, N, 12345] {
+            assert_eq!(
+                cur.move_to(&rowid.to_be_bytes(), SeekBias::Ge).unwrap(),
+                SeekResult::Equal,
+                "rowid {rowid} not found"
+            );
         }
     }
 }
