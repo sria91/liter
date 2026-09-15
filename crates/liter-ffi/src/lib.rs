@@ -192,6 +192,10 @@ pub unsafe extern "C" fn sqlite3_reset(stmt: *mut sqlite3_stmt) -> c_int {
 
     match stmt_ref.stmt.reset() {
         Ok(()) => SQLITE_OK,
+        // `Statement::reset` only ever fails via `Vdbe::reset`, which is
+        // currently infallible (always returns `Ok`), so this can't
+        // actually happen today; kept as a real match arm rather than an
+        // unwrap in case that changes.
         Err(e) => map_err(e),
     }
 }
@@ -765,6 +769,29 @@ mod tests {
     }
 
     #[test]
+    fn column_text_with_interior_nul_is_null_ptr() {
+        // A Rust `&str`/`Value::Text` can contain an embedded NUL byte (the
+        // C API's own SQL text can't, since it's read via `CStr::from_ptr`,
+        // but the underlying `Connection` takes a plain `&str`). When such
+        // a value is fetched through `sqlite3_column_text`, `CString::new`
+        // fails and the FFI layer must return a null pointer instead of
+        // panicking or truncating silently.
+        unsafe {
+            let db = open_mem();
+            let conn = &(*db).0;
+            conn.execute("CREATE TABLE t (x)", [] as [(); 0]).unwrap();
+            conn.execute("INSERT INTO t VALUES ('ab\0cd')", [] as [(); 0])
+                .unwrap();
+
+            let stmt = prepare(db, "SELECT x FROM t");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert!(sqlite3_column_text(stmt, 0).is_null());
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+    }
+
+    #[test]
     fn column_text_is_cached_across_calls() {
         unsafe {
             let db = open_mem();
@@ -847,26 +874,16 @@ mod tests {
             sqlite3_finalize(stmt);
 
             let stmt = prepare(db, "SELECT zeroblob(3)");
-            let step_result = sqlite3_step(stmt);
-            println!("sqlite3_step returned: {}", step_result);
-            assert_eq!(step_result, SQLITE_ROW);
-            let stmt_ref = &*stmt;
-            let value = stmt_ref.stmt.column_value(0);
-            println!("zeroblob(3) column_value result: {:?}", value);
-            match &value {
-                Ok(v) => println!("zeroblob(3) value: {:?}", v),
-                Err(e) => println!("zeroblob(3) column_value error: {:?}", e),
-            }
-            let type_result = sqlite3_column_type(stmt, 0);
-            println!("sqlite3_column_type returned: {}", type_result);
-            assert_eq!(step_result, SQLITE_ROW);
-            assert_eq!(type_result, SQLITE_BLOB);
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_type(stmt, 0), SQLITE_BLOB);
             assert_eq!(sqlite3_column_bytes(stmt, 0), 3);
             sqlite3_finalize(stmt);
 
             let stmt = prepare(db, "SELECT NULL");
             assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
             assert_eq!(sqlite3_column_type(stmt, 0), SQLITE_NULL);
+            // Null has no byte length: sqlite3_column_bytes' fallback arm.
+            assert_eq!(sqlite3_column_bytes(stmt, 0), 0);
             sqlite3_finalize(stmt);
 
             sqlite3_close(db);

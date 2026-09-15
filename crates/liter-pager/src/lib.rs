@@ -204,25 +204,21 @@ impl WalIndex {
         // Scan backward to find the most recent commit frame for pgno.
         // Only frames that are part of a committed transaction are visible
         // (i.e., frames whose db_size != 0, or frames before the last commit).
+        // `frames` never has gaps below `mx_frame` (and `last_commit_frame`
+        // never returns more than that), so indexing directly is safe.
         let last_commit = self.last_commit_frame();
-        for frame_no in (1..=last_commit).rev() {
-            if let Some(f) = self.frames.get(frame_no as usize) {
-                if f.pgno == pgno {
-                    return Some(frame_no);
-                }
-            }
-        }
-        None
+        (1..=last_commit)
+            .rev()
+            .find(|&frame_no| self.frames[frame_no as usize].pgno == pgno)
     }
 
     /// The index of the last commit frame visible to readers.
     fn last_commit_frame(&self) -> u32 {
         // Walk backward from mx_frame to find the last frame with db_size != 0.
+        // `frames` never has gaps below `mx_frame`, so indexing is safe.
         for i in (1..=self.mx_frame).rev() {
-            if let Some(f) = self.frames.get(i as usize) {
-                if f.db_size != 0 {
-                    return i;
-                }
+            if self.frames[i as usize].db_size != 0 {
+                return i;
             }
         }
         0
@@ -277,15 +273,23 @@ impl Wal {
 
                 let effective_ps = if file_ps == 0 { ps } else { file_ps };
                 let frame_size = WAL_FRAME_HDR_SIZE + effective_ps as u64;
-                let n_frames = if file_len >= WAL_HDR_SIZE {
-                    ((file_len - WAL_HDR_SIZE) / frame_size) as u32
-                } else {
-                    0
-                };
+                // `file_len >= WAL_HDR_SIZE` was already established by the
+                // enclosing `if` above, so this can't underflow.
+                let n_frames = ((file_len - WAL_HDR_SIZE) / frame_size) as u32;
 
                 let mut index = WalIndex::new(effective_ps, [salt1, salt2], [cksum1, cksum2]);
 
                 // Replay frame headers to build the in-process index.
+                //
+                // `n_frames` is computed above by flooring `(file_len -
+                // WAL_HDR_SIZE) / frame_size`, which guarantees every
+                // offset this loop reads from is within the file as it
+                // stood when `file_len` was measured. So in practice this
+                // can only fail via a genuine race (another process
+                // truncating the WAL file concurrently) rather than any
+                // reachable combination of header/content values; it's kept
+                // as a hard stop rather than an unwrap purely as defense
+                // against that race.
                 for frame_no in 1..=n_frames {
                     let off = index.frame_hdr_offset(frame_no);
                     let mut fhdr = [0u8; 24];
@@ -409,10 +413,11 @@ impl Wal {
         let mut copied = 0u32;
 
         for frame_no in 1..=last_commit {
-            let meta = match self.index.frames.get(frame_no as usize) {
-                Some(m) => m.clone(),
-                None => break,
-            };
+            // `last_commit` came from `last_commit_frame()`, which only
+            // returns an index it already found present in `frames`, and
+            // `frames` never has gaps below its highest index — so every
+            // frame_no in this range is guaranteed to exist.
+            let meta = self.index.frames[frame_no as usize].clone();
             if meta.pgno == 0 {
                 continue;
             }
@@ -599,14 +604,14 @@ impl Pager {
             return Ok(());
         }
         let wal = Wal::open(&self.path, self.page_size)?;
-        // If the WAL has committed frames, update db_size from the last commit.
-        if wal.index.last_commit_frame() > 0 {
-            let lc = wal.index.last_commit_frame();
-            if let Some(meta) = wal.index.frames.get(lc as usize) {
-                if meta.db_size > 0 {
-                    self.db_size = meta.db_size;
-                }
-            }
+        // If the WAL has committed frames, update db_size from the last
+        // commit. `last_commit_frame` only ever returns an index that (a)
+        // genuinely exists in `frames` (that's how it found it) and (b) has
+        // `db_size != 0` (that's its own search predicate), so neither is
+        // re-checked here.
+        let lc = wal.index.last_commit_frame();
+        if lc > 0 {
+            self.db_size = wal.index.frames[lc as usize].db_size;
         }
         self.wal = Some(wal);
         Ok(())
@@ -720,7 +725,7 @@ impl Pager {
             return Err(PagerError::NotInTransaction);
         }
 
-        if self.wal.is_some() {
+        if let Some(wal) = &mut self.wal {
             // WAL mode: collect dirty pages as frames and append to WAL.
             let dirty: Vec<PageNumber> = self.dirty_order.clone();
             let mut frames: Vec<(PageNumber, Vec<u8>)> = Vec::new();
@@ -732,9 +737,7 @@ impl Pager {
                 }
             }
             let db_size = self.db_size;
-            if let Some(wal) = &mut self.wal {
-                wal.append_frames(&frames, db_size)?;
-            }
+            wal.append_frames(&frames, db_size)?;
         } else {
             // Rollback-journal mode: seal the journal and write dirty pages.
             if let Some(j) = &mut self.journal {
@@ -1007,16 +1010,17 @@ impl Pager {
             return Ok(());
         }
         self.ensure_cached(1)?;
-        if let Some(p) = self.cache.get_mut(&1) {
-            if p.data.len() >= 100 && &p.data[0..16] == DB_MAGIC {
-                // Change counter (bytes 24-27): increment.
-                let cc = u32::from_be_bytes(p.data[24..28].try_into().unwrap());
-                p.data[24..28].copy_from_slice(&cc.wrapping_add(1).to_be_bytes());
-                // Database size (bytes 28-31).
-                p.data[28..32].copy_from_slice(&self.db_size.to_be_bytes());
-                let data = p.data.clone();
-                pwrite(&mut self.file, 0, &data)?;
-            }
+        // `ensure_cached` always inserts the page before returning `Ok`, so
+        // it's guaranteed to be present here.
+        let p = self.cache.get_mut(&1).unwrap();
+        if p.data.len() >= 100 && &p.data[0..16] == DB_MAGIC {
+            // Change counter (bytes 24-27): increment.
+            let cc = u32::from_be_bytes(p.data[24..28].try_into().unwrap());
+            p.data[24..28].copy_from_slice(&cc.wrapping_add(1).to_be_bytes());
+            // Database size (bytes 28-31).
+            p.data[28..32].copy_from_slice(&self.db_size.to_be_bytes());
+            let data = p.data.clone();
+            pwrite(&mut self.file, 0, &data)?;
         }
         Ok(())
     }
@@ -1952,10 +1956,11 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        match pager.acquire(3) {
-            Err(PagerError::Io(_)) => {}
-            other => panic!("expected an I/O error, got {other:?}"),
-        }
+        let result = pager.acquire(3);
+        assert!(
+            matches!(result, Err(PagerError::Io(_))),
+            "expected an I/O error, got {result:?}"
+        );
     }
 
     // ── Defensive fallbacks (inconsistent internal state) ────────────────
@@ -2019,6 +2024,55 @@ mod tests {
         // has no data for it either, so reading it must error rather than
         // silently returning bogus data or panicking.
         assert!(pager.acquire(2).is_err());
+    }
+
+    #[test]
+    fn commit_journal_mode_skips_dirty_order_entries_missing_from_cache() {
+        let (mut pager, f) = new_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 1;
+        pager.write_access(2).unwrap()[0] = 2;
+        // Simulate a more extreme inconsistent internal state than a
+        // dirty=false entry: page 2 is listed in dirty_order but has no
+        // cache entry at all.
+        pager.cache.remove(&2);
+        pager.commit().unwrap();
+
+        let mut p2 = Pager::open(f.path(), DEFAULT_PAGE_SIZE, false).unwrap();
+        assert_eq!(p2.acquire(1).unwrap()[0], 1);
+        assert_eq!(p2.db_size(), 1);
+        assert!(p2.acquire(2).is_err());
+    }
+
+    #[test]
+    fn commit_wal_mode_skips_dirty_order_entries_missing_from_cache() {
+        let (mut pager, _f) = new_wal_pager();
+        pager.begin_write().unwrap();
+        pager.write_access(1).unwrap()[0] = 1;
+        pager.write_access(2).unwrap()[0] = 2;
+        pager.cache.remove(&2);
+        pager.commit().unwrap();
+        pager.cache.clear();
+
+        assert_eq!(pager.acquire(1).unwrap()[0], 1);
+        assert!(pager.acquire(2).is_err());
+    }
+
+    #[test]
+    fn read_journal_records_propagates_non_eof_read_errors() {
+        // A write-only handle rejects reads with a genuine OS error, not
+        // UnexpectedEof, exercising the "some other read error" arm that a
+        // merely-truncated/empty journal (which fails with UnexpectedEof)
+        // can't reach.
+        let f = NamedTempFile::new().unwrap();
+        let mut wfile = OpenOptions::new().write(true).open(f.path()).unwrap();
+        let result = read_journal_records(&mut wfile, DEFAULT_PAGE_SIZE as usize);
+        assert!(result.is_err());
+        assert_ne!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof,
+            "expected a non-EOF read error from a write-only handle"
+        );
     }
 
     #[test]

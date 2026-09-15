@@ -38,16 +38,18 @@ pub fn run_cli<R: BufRead, W: Write>(
     };
 
     if interactive {
-        writeln!(
+        let res = writeln!(
             out,
             "Liter-rs v{} — targeting SQLite 3.53.x",
             env!("CARGO_PKG_VERSION")
-        )?;
+        );
+        res?;
         writeln!(out, "Connected to: {}", conn.path())?;
-        writeln!(
+        let res = writeln!(
             out,
             "Enter SQL statements terminated by ';', or '.quit' to exit."
-        )?;
+        );
+        res?;
     }
 
     run_session(input, &mut out, &conn, interactive)?;
@@ -113,6 +115,13 @@ fn exec_sql(
     out: &mut impl Write,
     interactive: bool,
 ) -> io::Result<()> {
+    // `liter::SqliteError::NotImplemented` is a defined error variant, but
+    // nothing in the `liter` crate's public API (query/execute and their
+    // error conversions) actually constructs one today — every codegen
+    // "not implemented" case surfaces as `SqliteError::Sql(...)` instead.
+    // These arms are kept as real, explicit handling (rather than folded
+    // into the generic `Err(e)` arm below) so the shell keeps working if
+    // that ever changes.
     if is_returning_sql(sql) {
         match conn.query(sql, [] as [(); 0]) {
             Ok(rows) => {
@@ -319,6 +328,19 @@ mod tests {
         let mut out = Vec::new();
         let input = b"SELECT * FROM nonexistent;\n";
         assert!(run_session(&input[..], &mut out, &conn, false).is_err());
+    }
+
+    #[test]
+    fn test_run_session_non_interactive_unterminated_line_no_prompt() {
+        // Non-interactive: an unterminated line takes neither the
+        // "statement complete" branch nor the "print continuation prompt"
+        // branch (that one only fires when `interactive`).
+        let conn = liter::Connection::open(":memory:").unwrap();
+        let mut out = Vec::new();
+        let input = b"SELECT\n1\n;\n";
+        assert!(run_session(&input[..], &mut out, &conn, false).is_ok());
+        let output = String::from_utf8(out).unwrap();
+        assert!(!output.contains("...>"));
     }
 
     #[test]

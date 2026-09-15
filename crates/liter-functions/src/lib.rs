@@ -580,6 +580,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mem_to_string_all_variants() {
+        // Every caller of `mem_to_string` already special-cases `Mem::Text`
+        // (and `Mem::Null`) before falling through to it, so its own `Text`
+        // arm is unreachable from any current call site — exercise it
+        // directly to verify the helper's behavior in isolation.
+        assert_eq!(mem_to_string(&Mem::Text(std::sync::Arc::from("hi"))), "hi");
+        assert_eq!(mem_to_string(&Mem::Int(42)), "42");
+        assert_eq!(mem_to_string(&Mem::Real(1.5)), "1.5");
+        assert_eq!(mem_to_string(&Mem::Null), "");
+        assert_eq!(
+            mem_to_string(&Mem::Blob(std::sync::Arc::from(vec![1u8]))),
+            ""
+        );
+    }
+
+    #[test]
     fn abs_int() {
         assert_eq!(func_abs(&[Mem::Int(-5)]).unwrap(), Mem::Int(5));
     }
@@ -738,11 +754,10 @@ mod tests {
 
         // Test julianday — result must be a Real within expected range.
         let jd = func_julianday(&[Mem::Text(std::sync::Arc::from("2023-01-01"))]).unwrap();
-        let jd_f = match jd {
-            Mem::Real(f) => f,
-            other => panic!("Expected Real, got {other:?}"),
-        };
-        assert!((jd_f - 2459945.5).abs() < 0.0001);
+        assert!(
+            matches!(jd, Mem::Real(f) if (f - 2459945.5).abs() < 0.0001),
+            "expected Real close to 2459945.5, got {jd:?}"
+        );
     }
 
     // ── Aggregate dispatch and state machines ──────────────────────────────
@@ -840,6 +855,12 @@ mod tests {
             weird.finalize().unwrap(),
             Mem::Text(std::sync::Arc::from("oops"))
         );
+
+        // No arguments at all: step() is a no-op rather than panicking on
+        // `args.first()`.
+        let mut no_args = dispatch_aggregate("sum").unwrap();
+        no_args.step(&[]).unwrap();
+        assert_eq!(no_args.finalize().unwrap(), Mem::Null);
     }
 
     #[test]
@@ -1030,6 +1051,16 @@ mod tests {
         assert_eq!(
             func_substr(&[Mem::Int(12345), Mem::Int(2), Mem::Int(2)]).unwrap(),
             Mem::Text(std::sync::Arc::from("23"))
+        );
+        // Blob (and ZeroBlob/Agg) have no textual representation, so
+        // `mem_to_string`'s fallback arm treats them as an empty string.
+        assert_eq!(
+            func_substr(&[
+                Mem::Blob(std::sync::Arc::from(vec![1u8, 2, 3])),
+                Mem::Int(1)
+            ])
+            .unwrap(),
+            Mem::Text(std::sync::Arc::from(""))
         );
     }
 
@@ -1265,11 +1296,10 @@ mod tests {
     fn date_functions_now_and_julian_real_roundtrip() {
         // "now" (case-insensitively) resolves to the current time rather than NULL.
         let now_date = func_date(&[Mem::Text(std::sync::Arc::from("NOW"))]).unwrap();
-        let now_text = match now_date {
-            Mem::Text(t) => t,
-            other => panic!("expected text, got {other:?}"),
-        };
-        assert_eq!(now_text.len(), 10);
+        assert!(
+            matches!(&now_date, Mem::Text(t) if t.len() == 10),
+            "expected a 10-char text date, got {now_date:?}"
+        );
 
         // A Julian day (Real) round-trips back to the same calendar date/time.
         assert_eq!(
@@ -1423,6 +1453,11 @@ mod tests {
         );
         assert_eq!(
             dispatch_function("zeroblob", &[Mem::Real(-3.5)]).unwrap(),
+            Mem::ZeroBlob(0)
+        );
+        // Non-numeric, non-null arguments also fall back to zeroblob(0).
+        assert_eq!(
+            dispatch_function("zeroblob", &[Mem::Text(std::sync::Arc::from("x"))]).unwrap(),
             Mem::ZeroBlob(0)
         );
         assert!(dispatch_function("zeroblob", &[]).is_err());

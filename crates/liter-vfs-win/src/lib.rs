@@ -167,7 +167,7 @@ mod platform {
     }
 
     pub fn acquire_lock(file: &File, target: LockLevel, current: LockLevel) -> io::Result<()> {
-        let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
+        let handle = HANDLE(file.as_raw_handle());
         match target {
             LockLevel::Shared if current < LockLevel::Shared => {
                 shared_lock_range(handle, SHARED_FIRST, 1)
@@ -194,7 +194,7 @@ mod platform {
     }
 
     pub fn release_lock(file: &File, target: LockLevel, current: LockLevel) -> io::Result<()> {
-        let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
+        let handle = HANDLE(file.as_raw_handle());
         if current >= LockLevel::Exclusive && target < LockLevel::Exclusive {
             unlock_range(handle, SHARED_FIRST, SHARED_SIZE)?;
             if target >= LockLevel::Shared {
@@ -208,14 +208,22 @@ mod platform {
         if current >= LockLevel::Reserved && target < LockLevel::Reserved {
             unlock_range(handle, RESERVED_BYTE, 1)?;
         }
-        if current >= LockLevel::Shared && target < LockLevel::Shared {
+        // At Exclusive, the single shared byte isn't held separately — it
+        // was released and subsumed into the full-range exclusive lock
+        // above, so unlocking it again here would fail with "already
+        // unlocked". Only unlock it when it's genuinely still held on its
+        // own, i.e. below Exclusive.
+        if current >= LockLevel::Shared
+            && current < LockLevel::Exclusive
+            && target < LockLevel::Shared
+        {
             unlock_range(handle, SHARED_FIRST, 1)?;
         }
         Ok(())
     }
 
     pub fn check_reserved_lock(file: &File) -> io::Result<bool> {
-        let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
+        let handle = HANDLE(file.as_raw_handle());
         // Try a non-blocking exclusive lock on the reserved byte.
         // If it succeeds, nobody holds it → release and return false.
         // If it fails, someone holds it → return true.
@@ -401,6 +409,98 @@ mod tests {
         // Delete
         vfs.delete(&path, false).unwrap();
         assert!(!vfs.access(&path, AccessFlags::EXISTS).unwrap());
+    }
+
+    #[test]
+    fn lock_contention_between_two_handles_fails_as_expected() {
+        // Two independent handles on the same file exercise the real
+        // Windows LockFileEx/UnlockFile failure paths that a single handle
+        // can never trigger on its own (a handle's own locks never
+        // conflict with themselves).
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lock_contention.db");
+        let vfs = WinVfs;
+
+        let mut a = vfs
+            .open(&path, OpenFlags::CREATE | OpenFlags::READ_WRITE)
+            .unwrap();
+        let mut b = vfs.open(&path, OpenFlags::READ_WRITE).unwrap();
+
+        // Nobody holds the reserved byte yet.
+        assert!(!b.check_reserved_lock().unwrap());
+
+        // `a` escalates to Reserved; `b` must see the reserved byte held
+        // (exclusive_lock_range's Err arm, via check_reserved_lock's own
+        // Err(_) => Ok(true) arm).
+        a.lock(LockLevel::Shared).unwrap();
+        a.lock(LockLevel::Reserved).unwrap();
+        assert!(b.check_reserved_lock().unwrap());
+
+        // `b` trying to acquire Reserved itself now genuinely fails (a
+        // second exclusive_lock_range Err path, this time propagated
+        // directly out of `lock` rather than swallowed).
+        b.lock(LockLevel::Shared).unwrap();
+        assert!(b.lock(LockLevel::Reserved).is_err());
+        b.unlock(LockLevel::None).unwrap();
+        a.unlock(LockLevel::None).unwrap();
+
+        // `a` escalates all the way to Exclusive; `b` re-acquiring Shared
+        // against it must fail (shared_lock_range's Err arm).
+        a.lock(LockLevel::Shared).unwrap();
+        a.lock(LockLevel::Reserved).unwrap();
+        a.lock(LockLevel::Pending).unwrap();
+        a.lock(LockLevel::Exclusive).unwrap();
+        assert!(b.lock(LockLevel::Shared).is_err());
+
+        // From LockLevel::None, escalating straight to Exclusive while `a`
+        // holds Exclusive must fail at the very first step (acquiring the
+        // pending byte), exercising the `?` inside the Exclusive arm.
+        assert!(b.lock(LockLevel::Exclusive).is_err());
+
+        a.unlock(LockLevel::None).unwrap();
+    }
+
+    #[test]
+    fn platform_functions_reject_mismatched_lock_state() {
+        // `platform::acquire_lock`/`release_lock` are public and trust the
+        // caller's `current` claim; the safe `WinFile::lock`/`unlock`
+        // wrappers always pass an accurate one, but calling the platform
+        // functions directly with a *false* claim of a lock we don't
+        // actually hold exercises the OS-level failure paths a truthful
+        // caller can never hit (there's nothing wrong to unlock/release
+        // when your own bookkeeping is correct).
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lock_state_mismatch.db");
+        let vfs = WinVfs;
+        let file = vfs
+            .open(&path, OpenFlags::CREATE | OpenFlags::READ_WRITE)
+            .unwrap();
+
+        // Claiming a shared lock we never took: unlocking it fails
+        // (unlock_range's Err arm).
+        assert!(platform::release_lock(&file.file, LockLevel::None, LockLevel::Shared).is_err());
+
+        // Claiming a shared lock we never took while escalating straight to
+        // Exclusive: the "release our own shared byte first" step fails
+        // for the same reason.
+        assert!(
+            platform::acquire_lock(&file.file, LockLevel::Exclusive, LockLevel::Shared).is_err()
+        );
+
+        // A fresh file/handle escalating straight from None to Exclusive
+        // skips the "release our own shared byte" step entirely (there's
+        // truthfully nothing to release), taking the other side of that
+        // `if current >= LockLevel::Shared` branch.
+        let path2 = dir.path().join("lock_state_from_none.db");
+        let file2 = vfs
+            .open(&path2, OpenFlags::CREATE | OpenFlags::READ_WRITE)
+            .unwrap();
+        assert!(platform::acquire_lock(&file2.file, LockLevel::Exclusive, LockLevel::None).is_ok());
+
+        // `target`'s guard fails to hold (current already >= target) and no
+        // other arm's pattern matches `target`, falling through to the
+        // catch-all "already at or above target" arm.
+        assert!(platform::acquire_lock(&file.file, LockLevel::Shared, LockLevel::Shared).is_ok());
     }
 
     #[test]
