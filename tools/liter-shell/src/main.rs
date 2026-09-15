@@ -17,7 +17,7 @@ fn main() {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    if let Err(_) = run_cli(&args, stdin.lock(), &mut out, interactive) {
+    if run_cli(&args, stdin.lock(), &mut out, interactive).is_err() {
         std::process::exit(1);
     }
 }

@@ -267,6 +267,10 @@ impl Connection {
             return Err(e);
         }
 
+        if auto_txn {
+            self.btree.commit()?;
+        }
+
         // If it was a CREATE TABLE statement, insert into the schema catalog.
         if is_create {
             if let Some(rp) = root_page {
@@ -288,10 +292,6 @@ impl Connection {
                     }
                 }
             }
-        }
-
-        if auto_txn {
-            self.btree.commit()?;
         }
 
         Ok(0)
@@ -492,7 +492,11 @@ impl Statement<'_> {
 
     /// Return the number of result columns in this statement.
     pub fn column_count(&self) -> usize {
-        self.column_cache.len()
+        if !self.column_cache.is_empty() {
+            self.column_cache.len()
+        } else {
+            self.vm.num_result_cols()
+        }
     }
 }
 
@@ -1044,8 +1048,8 @@ mod tests {
         assert_eq!(mem_to_value(&liter_vdbe::Mem::Null), Value::Null);
         assert_eq!(mem_to_value(&liter_vdbe::Mem::Int(42)), Value::Int(42));
         assert_eq!(
-            mem_to_value(&liter_vdbe::Mem::Real(3.14)),
-            Value::Real(3.14)
+            mem_to_value(&liter_vdbe::Mem::Real(3.5)),
+            Value::Real(3.5)
         );
         assert_eq!(
             mem_to_value(&liter_vdbe::Mem::Text("abc".into())),

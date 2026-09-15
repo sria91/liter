@@ -82,11 +82,11 @@ impl<'a> Optimizer<'a> {
         };
 
         // For this phase, we only support optimizing a single table FROM clause.
-        let table_name = if let Some(from) = &body.from {
+        let (scan_table_name, physical_table_name) = if let Some(from) = &body.from {
             if from.tables.len() == 1 {
                 match &from.tables[0] {
                     TableOrSubquery::Table { alias, name, .. } => {
-                        alias.clone().unwrap_or_else(|| name.clone())
+                        (alias.clone().unwrap_or_else(|| name.clone()), name.clone())
                     }
                     _ => return Err(OptimizeError::NotImplemented),
                 }
@@ -100,11 +100,16 @@ impl<'a> Optimizer<'a> {
         // Extract constraints targeting this table from the WHERE clause
         let mut constraints = Vec::new();
         if let Some(where_expr) = &body.where_ {
-            self.extract_constraints(where_expr, &table_name, &mut constraints);
+            self.extract_constraints(
+                where_expr,
+                &scan_table_name,
+                &physical_table_name,
+                &mut constraints,
+            );
         }
 
-        // Fetch schema indexes
-        let indexes = self.schema.indexes_for(&table_name);
+        // Fetch schema indexes for the underlying physical table
+        let indexes = self.schema.indexes_for(&physical_table_name);
 
         // Determine best scan path based on heuristics
         let scan_kind = if constraints.iter().any(|c| c == "id" || c == "rowid") {
@@ -131,32 +136,44 @@ impl<'a> Optimizer<'a> {
 
         Ok(QueryPlan {
             loops: vec![QueryLoop {
-                table: table_name,
+                table: scan_table_name,
                 scan_kind,
                 estimated_rows,
             }],
         })
     }
 
-    fn extract_constraints(&self, expr: &Expr, target_table: &str, constraints: &mut Vec<String>) {
+    fn extract_constraints(
+        &self,
+        expr: &Expr,
+        target_table: &str,
+        physical_table: &str,
+        constraints: &mut Vec<String>,
+    ) {
         if let Expr::Binary { op, left, right } = expr {
             if matches!(
                 op,
                 BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le
             ) {
                 if let Expr::Column { table, name, .. } = &**left {
-                    if table.is_none() || table.as_deref() == Some(target_table) {
+                    if table.is_none()
+                        || table.as_deref() == Some(target_table)
+                        || table.as_deref() == Some(physical_table)
+                    {
                         constraints.push(name.clone());
                     }
                 }
                 if let Expr::Column { table, name, .. } = &**right {
-                    if table.is_none() || table.as_deref() == Some(target_table) {
+                    if table.is_none()
+                        || table.as_deref() == Some(target_table)
+                        || table.as_deref() == Some(physical_table)
+                    {
                         constraints.push(name.clone());
                     }
                 }
             }
-            self.extract_constraints(left, target_table, constraints);
-            self.extract_constraints(right, target_table, constraints);
+            self.extract_constraints(left, target_table, physical_table, constraints);
+            self.extract_constraints(right, target_table, physical_table, constraints);
         }
     }
 }
@@ -336,7 +353,7 @@ mod tests {
             }),
         };
         let mut constraints = Vec::new();
-        optimizer.extract_constraints(&matching, "users", &mut constraints);
+        optimizer.extract_constraints(&matching, "users", "users", &mut constraints);
         assert_eq!(constraints, vec!["id".to_string(), "id2".to_string()]);
 
         let other_table = Expr::Binary {
@@ -349,7 +366,7 @@ mod tests {
             right: Box::new(Expr::Literal(LiteralValue::Integer(2))),
         };
         let mut constraints2 = Vec::new();
-        optimizer.extract_constraints(&other_table, "users", &mut constraints2);
+        optimizer.extract_constraints(&other_table, "users", "users", &mut constraints2);
         assert!(constraints2.is_empty());
 
         let other_table_right = Expr::Binary {
@@ -362,7 +379,7 @@ mod tests {
             }),
         };
         let mut constraints3 = Vec::new();
-        optimizer.extract_constraints(&other_table_right, "users", &mut constraints3);
+        optimizer.extract_constraints(&other_table_right, "users", "users", &mut constraints3);
         assert!(constraints3.is_empty());
     }
 
@@ -389,7 +406,7 @@ mod tests {
             }),
         };
         let mut constraints = Vec::new();
-        optimizer.extract_constraints(&expr, "users", &mut constraints);
+        optimizer.extract_constraints(&expr, "users", "users", &mut constraints);
         assert_eq!(constraints, vec!["id".to_string()]);
     }
 
@@ -441,7 +458,7 @@ mod tests {
                 }),
             };
             let mut constraints = Vec::new();
-            optimizer.extract_constraints(&expr, "users", &mut constraints);
+            optimizer.extract_constraints(&expr, "users", "users", &mut constraints);
             assert_eq!(constraints, vec!["c1".to_string(), "c2".to_string()]);
         }
     }
@@ -477,7 +494,7 @@ mod tests {
         schema.insert(SchemaObject {
             kind: ObjectKind::Index,
             name: "idx_users_email".to_string(),
-            tbl_name: "u".to_string(),
+            tbl_name: "users".to_string(),
             root_page: 3,
             sql: None,
             columns: vec![],

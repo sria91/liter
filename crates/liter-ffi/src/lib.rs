@@ -68,7 +68,6 @@ pub type Sqlite3Callback =
     Option<unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int>;
 
 fn map_err(err: SqliteError) -> c_int {
-    eprintln!("map_err: {:?}", err);
     match err {
         SqliteError::Sql(_) => SQLITE_ERROR,
         SqliteError::NoMem => SQLITE_NOMEM,
@@ -298,6 +297,8 @@ pub unsafe extern "C" fn sqlite3_column_bytes(stmt: *mut sqlite3_stmt, i_col: c_
     match stmt_ref.stmt.column_value(i_col as usize) {
         Ok(Value::Text(t)) => t.len() as c_int,
         Ok(Value::Blob(b)) => b.len() as c_int,
+        Ok(Value::Int(i)) => i.to_string().len() as c_int,
+        Ok(Value::Real(f)) => f.to_string().len() as c_int,
         _ => 0,
     }
 }
@@ -905,13 +906,25 @@ mod tests {
     }
 
     #[test]
-    fn column_bytes_of_non_text_is_zero() {
+    fn column_bytes_of_numeric_returns_text_len() {
         unsafe {
             let db = open_mem();
             let stmt = prepare(db, "SELECT 1");
             assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
-            assert_eq!(sqlite3_column_bytes(stmt, 0), 0);
+            // After coercion, "1" is 1 byte
+            assert_eq!(sqlite3_column_bytes(stmt, 0), 1);
             sqlite3_finalize(stmt);
+
+            let stmt = prepare(db, "SELECT 42");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_bytes(stmt, 0), 2);
+            sqlite3_finalize(stmt);
+
+            let stmt = prepare(db, "SELECT 1.5");
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert!(sqlite3_column_bytes(stmt, 0) > 0);
+            sqlite3_finalize(stmt);
+
             sqlite3_close(db);
         }
     }
@@ -924,11 +937,11 @@ mod tests {
     }
 
     #[test]
-    fn column_count_before_step_is_zero_then_matches_after_step() {
+    fn column_count_matches_before_and_after_step() {
         unsafe {
             let db = open_mem();
             let stmt = prepare(db, "SELECT 1, 2, 3");
-            assert_eq!(sqlite3_column_count(stmt), 0);
+            assert_eq!(sqlite3_column_count(stmt), 3);
             assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
             assert_eq!(sqlite3_column_count(stmt), 3);
             sqlite3_finalize(stmt);

@@ -50,6 +50,8 @@ jobs:
       run: cargo test -p differential
 
   coverage:
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -57,6 +59,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v5
+      with:
+        persist-credentials: false
 
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
@@ -76,11 +80,11 @@ jobs:
         path: lcov-${{ matrix.os }}.info
 
   coverage_report:
+    permissions:
+      contents: read
     needs: coverage
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
-
     - name: Install lcov
       run: sudo apt-get update && sudo apt-get install -y lcov
 
@@ -92,10 +96,11 @@ jobs:
 
     - name: Merge coverage reports
       run: |
+        sed -i 's|\\|/|g' lcov-windows-latest.info
+        sed -i -E 's|^SF:.*crates/|SF:crates/|; s|^SF:.*tests/|SF:tests/|; s|^SF:.*tools/|SF:tools/|' lcov-ubuntu-latest.info lcov-windows-latest.info
         lcov --add-tracefile lcov-ubuntu-latest.info \
              --add-tracefile lcov-windows-latest.info \
-             --output-file lcov-merged.info \
-             --ignore-errors inconsistent,inconsistent
+             --output-file lcov-merged.info
         lcov --summary lcov-merged.info
 
     - name: Upload merged coverage report

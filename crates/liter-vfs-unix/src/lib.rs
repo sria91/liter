@@ -84,21 +84,31 @@ impl VfsFile for UnixFile {
         {
             use std::os::unix::io::AsRawFd;
             let fd = self.file.as_raw_fd();
+            if self.lock < LockLevel::Shared && level >= LockLevel::Shared {
+                // Read lock on a byte in the shared range.
+                fcntl_lock(fd, libc::F_RDLCK, SHARED_FIRST, 1)?;
+                self.lock = LockLevel::Shared;
+            }
+            if self.lock < LockLevel::Reserved && level == LockLevel::Reserved {
+                // Write lock on the reserved byte.
+                fcntl_lock(fd, libc::F_WRLCK, RESERVED_BYTE, 1)?;
+                self.lock = LockLevel::Reserved;
+            }
+            if self.lock < LockLevel::Pending && level >= LockLevel::Pending {
+                // Write lock on the pending byte.
+                fcntl_lock(fd, libc::F_WRLCK, PENDING_BYTE, 1)?;
+                self.lock = LockLevel::Pending;
+            }
             if level >= LockLevel::Exclusive {
                 // Write lock over the entire shared range.
                 fcntl_lock(fd, libc::F_WRLCK, SHARED_FIRST, SHARED_SIZE)?;
-            } else if level >= LockLevel::Pending {
-                // Write lock on the pending byte.
-                fcntl_lock(fd, libc::F_WRLCK, PENDING_BYTE, 1)?;
-            } else if level >= LockLevel::Reserved {
-                // Write lock on the reserved byte.
-                fcntl_lock(fd, libc::F_WRLCK, RESERVED_BYTE, 1)?;
-            } else {
-                // Read lock on a random byte in the shared range (LockLevel::Shared).
-                fcntl_lock(fd, libc::F_RDLCK, SHARED_FIRST, 1)?;
+                self.lock = LockLevel::Exclusive;
             }
         }
-        self.lock = level;
+        #[cfg(not(unix))]
+        {
+            self.lock = level;
+        }
         Ok(())
     }
 

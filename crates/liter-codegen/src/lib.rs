@@ -1466,6 +1466,14 @@ impl<'a> Compiler<'a> {
             } => {
                 let r_inner = self.compile_expr(operand, cursor_ctx)?;
                 let r_res = self.vm.alloc_reg();
+                let null_jump = self.vm.emit(VdbeOp {
+                    opcode: Opcode::IsNull,
+                    p1: r_inner as i32,
+                    p2: 0,
+                    p3: 0,
+                    p4: P4::None,
+                    p5: 0,
+                });
                 self.vm.emit(VdbeOp {
                     opcode: Opcode::Integer,
                     p1: 0,
@@ -1507,9 +1515,27 @@ impl<'a> Compiler<'a> {
                     p4: P4::None,
                     p5: 0,
                 });
+                let end_addr2 = self.vm.emit(VdbeOp {
+                    opcode: Opcode::Goto,
+                    p1: 0,
+                    p2: 0,
+                    p3: 0,
+                    p4: P4::None,
+                    p5: 0,
+                });
+                let null_addr = self.vm.emit(VdbeOp {
+                    opcode: Opcode::Null,
+                    p1: 0,
+                    p2: r_res as i32,
+                    p3: 0,
+                    p4: P4::None,
+                    p5: 0,
+                });
                 let post_addr = self.vm.ops.len();
+                self.vm.ops[null_jump].p2 = null_addr as i32;
                 self.vm.ops[jump_addr].p2 = true_addr as i32;
                 self.vm.ops[end_addr].p2 = post_addr as i32;
+                self.vm.ops[end_addr2].p2 = post_addr as i32;
                 Ok(r_res)
             }
 

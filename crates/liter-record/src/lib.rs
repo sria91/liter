@@ -106,8 +106,8 @@ pub fn decode_value(serial_type: u64, payload: &[u8]) -> RecordResult<(Value, us
             if payload.len() < 3 {
                 return Err(RecordError::BufferTooShort);
             }
-            let v =
-                ((payload[0] as i32) << 16 | (payload[1] as i32) << 8 | payload[2] as i32) as i64;
+            let fill = if payload[0] & 0x80 != 0 { 0xFF } else { 0x00 };
+            let v = i32::from_be_bytes([fill, payload[0], payload[1], payload[2]]) as i64;
             Ok((Value::Int(v), 3))
         }
         4 => {
@@ -121,7 +121,8 @@ pub fn decode_value(serial_type: u64, payload: &[u8]) -> RecordResult<(Value, us
             if payload.len() < 6 {
                 return Err(RecordError::BufferTooShort);
             }
-            let mut arr = [0u8; 8];
+            let fill = if payload[0] & 0x80 != 0 { 0xFF } else { 0x00 };
+            let mut arr = [fill; 8];
             arr[2..8].copy_from_slice(&payload[0..6]);
             let v = i64::from_be_bytes(arr);
             Ok((Value::Int(v), 6))
@@ -440,6 +441,8 @@ mod tests {
         let (v, n) = decode_value(3, &[0x01, 0x02, 0x03]).unwrap();
         assert_eq!(v, Value::Int(66051));
         assert_eq!(n, 3);
+        let (v_neg, _) = decode_value(3, &[0xFF, 0xFE, 0xFD]).unwrap();
+        assert_eq!(v_neg, Value::Int(-259));
         assert!(matches!(
             decode_value(3, &[1, 2]),
             Err(RecordError::BufferTooShort)
@@ -458,6 +461,8 @@ mod tests {
         let (v, n) = decode_value(5, &[0x00, 0x00, 0x01, 0x00, 0x00, 0x00]).unwrap();
         assert_eq!(v, Value::Int(16777216));
         assert_eq!(n, 6);
+        let (v_neg, _) = decode_value(5, &[0xFF, 0xFF, 0xFE, 0xFD, 0xFC, 0xFB]).unwrap();
+        assert_eq!(v_neg, Value::Int(-16909061));
         assert!(matches!(
             decode_value(5, &[1, 2, 3, 4, 5]),
             Err(RecordError::BufferTooShort)
@@ -529,7 +534,7 @@ mod tests {
             Value::Int(10_000_000),
             Value::Int(1_000_000_000_000),
             Value::Int(i64::MIN),
-            Value::Real(2.71828),
+            Value::Real(2.5),
             Value::Blob(vec![1, 2, 3, 4]),
             Value::Text(b"SQLite Clone Liter".to_vec()),
         ];

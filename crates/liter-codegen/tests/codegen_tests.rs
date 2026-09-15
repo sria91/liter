@@ -333,6 +333,13 @@ fn test_compile_literals_and_unary() {
                     },
                     alias: None,
                 },
+                ResultColumn::Expr {
+                    expr: Expr::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(Expr::Literal(LiteralValue::Null)),
+                    },
+                    alias: None,
+                },
             ],
             from: None,
             where_: None,
@@ -348,6 +355,15 @@ fn test_compile_literals_and_unary() {
     let btree = BTree::new_in_memory();
     let mut cursors = [];
     assert_eq!(vm.step(&btree, &mut cursors).unwrap(), StepResult::Row);
+    let row = vm.current_result_row().unwrap();
+    assert_eq!(row[0], liter_vdbe::Mem::Int(1)); // True
+    assert_eq!(row[1], liter_vdbe::Mem::Int(0)); // False
+    assert_eq!(row[2], liter_vdbe::Mem::Null); // Null
+    assert_eq!(row[3], liter_vdbe::Mem::Int(42)); // +42
+    assert_eq!(row[4], liter_vdbe::Mem::Int(10)); // -(-10)
+    assert_eq!(row[5], liter_vdbe::Mem::Int(1)); // NOT 0
+    assert_eq!(row[6], liter_vdbe::Mem::Int(0)); // NOT 1
+    assert_eq!(row[7], liter_vdbe::Mem::Null); // NOT NULL
     assert_eq!(vm.step(&btree, &mut cursors).unwrap(), StepResult::Done);
 }
 

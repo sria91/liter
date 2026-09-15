@@ -379,6 +379,16 @@ impl Vdbe {
         }
     }
 
+    /// Return the number of result columns defined by the VDBE program.
+    pub fn num_result_cols(&self) -> usize {
+        for op in &self.ops {
+            if op.opcode == Opcode::ResultRow {
+                return op.p2 as usize;
+            }
+        }
+        0
+    }
+
     /// Allocate a register and return its index.
     pub fn alloc_reg(&mut self) -> usize {
         let idx = self.regs.len();

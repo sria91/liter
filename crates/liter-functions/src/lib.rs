@@ -213,7 +213,7 @@ pub fn func_length(args: &[Mem]) -> FuncResult<Mem> {
     match args.first() {
         Some(Mem::Text(s)) => Ok(Mem::Int(s.chars().count() as i64)),
         Some(Mem::Blob(b)) => Ok(Mem::Int(b.len() as i64)),
-        Some(Mem::ZeroBlob(n)) => Ok(Mem::Int(*n as i64)),
+        Some(Mem::ZeroBlob(n)) => Ok(Mem::Int(*n)),
         Some(Mem::Null) | None => Ok(Mem::Null),
         _ => Ok(Mem::Null),
     }
@@ -224,22 +224,12 @@ pub fn func_zeroblob(args: &[Mem]) -> FuncResult<Mem> {
         return Err(FuncError::WrongArgCount("zeroblob".into()));
     }
     match args.first() {
-        Some(Mem::Int(n)) if *n >= 0 => {
-            println!("zeroblob called with Int({})", n);
-            Ok(Mem::ZeroBlob(*n as i64))
-        }
-        Some(Mem::Real(f)) if *f >= 0.0 => {
-            println!("zeroblob called with Real({})", f);
-            Ok(Mem::ZeroBlob(*f as i64))
-        }
-        Some(Mem::Null) => {
-            println!("zeroblob called with Null");
-            Ok(Mem::Null)
-        }
-        _ => {
-            println!("zeroblob called with unsupported arg");
-            Ok(Mem::Null)
-        }
+        Some(Mem::Int(n)) if *n >= 0 => Ok(Mem::ZeroBlob(*n)),
+        Some(Mem::Int(_)) => Ok(Mem::ZeroBlob(0)),
+        Some(Mem::Real(f)) if *f >= 0.0 => Ok(Mem::ZeroBlob(*f as i64)),
+        Some(Mem::Real(_)) => Ok(Mem::ZeroBlob(0)),
+        Some(Mem::Null) => Ok(Mem::Null),
+        _ => Ok(Mem::ZeroBlob(0)),
     }
 }
 
@@ -1145,8 +1135,8 @@ mod tests {
         );
         // Real arguments are also coerced through mem_to_string.
         assert_eq!(
-            func_instr(&[Mem::Real(3.14), Mem::Text(std::sync::Arc::from("14"))]).unwrap(),
-            Mem::Int(3)
+            func_instr(&[Mem::Real(3.5), Mem::Text(std::sync::Arc::from(".5"))]).unwrap(),
+            Mem::Int(2)
         );
     }
 
@@ -1426,9 +1416,14 @@ mod tests {
             dispatch_function("zeroblob", &[Mem::Null]).unwrap(),
             Mem::Null
         );
+        // Negative arguments produce zeroblob(0), not NULL
         assert_eq!(
             dispatch_function("zeroblob", &[Mem::Int(-1)]).unwrap(),
-            Mem::Null
+            Mem::ZeroBlob(0)
+        );
+        assert_eq!(
+            dispatch_function("zeroblob", &[Mem::Real(-3.5)]).unwrap(),
+            Mem::ZeroBlob(0)
         );
         assert!(dispatch_function("zeroblob", &[]).is_err());
         assert_eq!(func_length(&[Mem::ZeroBlob(10)]).unwrap(), Mem::Int(10));

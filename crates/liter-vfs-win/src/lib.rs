@@ -367,7 +367,7 @@ mod tests {
         file.sync(SyncFlags::FULL).unwrap();
 
         // Lock transitions
-        assert_eq!(file.check_reserved_lock().unwrap(), false);
+        assert!(!file.check_reserved_lock().unwrap());
 
         // Escalating locks
         file.lock(LockLevel::Shared).unwrap();
@@ -429,6 +429,6 @@ mod tests {
 
         assert!(platform::acquire_lock(&file.file, LockLevel::Shared, LockLevel::None).is_ok());
         assert!(platform::release_lock(&file.file, LockLevel::None, LockLevel::Shared).is_ok());
-        assert_eq!(platform::check_reserved_lock(&file.file).unwrap(), false);
+        assert!(!platform::check_reserved_lock(&file.file).unwrap());
     }
 }
