@@ -8,7 +8,7 @@ applyTo: '**'
 
 This rule applies to every request involving this codebase.
 
-Always call `list_projects` first when you do not already know the project name, then use the `display_name` or exact `name` returned by that tool.
+Always call `list_projects` first when you do not already know the project name, then use the exact `name` returned by that tool.
 
 ### Workflow
 
@@ -17,19 +17,19 @@ Always call `list_projects` first when you do not already know the project name,
 list_projects()
 
 // Step 1 — orient
-get_architecture({ "project": "<display_name>" })
+get_architecture({ "project": "<name>" })
 
 // Step 2 — find symbols
-search_graph({ "project": "<display_name>", "name_pattern": "<symbol>" })
+search_graph({ "project": "<name>", "name_pattern": "<symbol>" })
 
 // Step 3 — trace call chains
-trace_path({ "project": "<display_name>", "function_name": "<fn>" })
+trace_path({ "project": "<name>", "function_name": "<fn>" })
 
 // Step 4 — read source
-get_code_snippet({ "project": "<display_name>", "qualified_name": "<fn>" })
+get_code_snippet({ "project": "<name>", "qualified_name": "<fn>" })
 
 // Step 5 — verify coverage for files you cite
-check_index_coverage({ "project": "<display_name>", "paths": ["<file>"] })
+check_index_coverage({ "project": "<name>", "paths": ["<file>"] })
 ```
 
 Only use `read_file` / grep when you need exact raw content or when graph coverage is insufficient.

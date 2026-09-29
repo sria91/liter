@@ -7,7 +7,7 @@
 - **Language**: Rust (stable toolchain, edition 2021)
 - **License**: MIT OR Apache-2.0
 - **Architecture**: VFS → Pager → B-Tree → Record → VDBE → Parser/Codegen → FFI
-- **Naming**: All crates use the `liter-` prefix (e.g., `liter-pager`, `liter-vdbe`, `liter-ffi`)
+- **Naming**: Production crates use the `liter-` prefix (e.g., `liter-pager`, `liter-vdbe`, `liter-ffi`); test and benchmark packages use descriptive names (`differential`, `format-compat`, `tcl-suite`, `oom-tests`, `benches`)
 - **Entry points**: `crates/liter` (Rust API), `crates/liter-ffi` (C ABI), `tools/liter-shell` (CLI)
 - **Testing**: Unit tests, differential harness (`tests/differential`), TCL conformance (`tests/tcl_suite`), OOM injection (`tests/oom`), format compat (`tests/format_compat`), fuzz targets (`fuzz/`)
 

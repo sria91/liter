@@ -1,13 +1,13 @@
 # liter
 
-`liter` is a from-scratch, high-performance, strictly API-compatible reimplementation of SQLite3 (v3.53.x) written in Rust.
+`liter` is an early-stage, from-scratch implementation of SQLite3 (v3.53.x) written in Rust. Full API and ABI compatibility are future goals.
 
 ## Project Overview
 
-`liter` aims to bring the reliability, performance, and ubiquity of SQLite to the Rust ecosystem while maintaining binary and ABI-level compatibility with the original C implementation where possible.
+`liter` aims to bring the reliability, performance, and ubiquity of SQLite to the Rust ecosystem while working toward binary and ABI-level compatibility with the original C implementation.
 
 ### Key Goals
-- **API Compatibility**: Drop-in replacement for the SQLite3 C API.
+- **API Compatibility** *(in progress)*: Drop-in replacement for the SQLite3 C API.
 - **Safety & Correctness**: Leverage Rust's memory safety guarantees without sacrificing performance.
 - **Performance**: Match or exceed SQLite performance benchmarks.
 - **Testability**: Comprehensive differential testing, OOM injection, and conformance suites.

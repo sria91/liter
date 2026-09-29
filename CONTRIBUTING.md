@@ -46,7 +46,7 @@ All three checks run in CI and must pass.
 | Unit tests | `cargo test --workspace` | Per-crate unit tests |
 | Differential | `cargo test -p differential` | Verifies output matches C SQLite (via `rusqlite`) |
 | Format compat | `cargo test -p format-compat` | Ensures on-disk format compatibility |
-| OOM injection | `cargo test -p oom` | Tests behavior under allocation failure |
+| OOM injection | `cargo test -p oom-tests` | Tests behavior under allocation failure |
 | TCL conformance | See CI workflow | Runs the official SQLite TCL test suite |
 | Fuzz targets | `cargo fuzz run <target>` | libfuzzer-based fuzz testing |
 

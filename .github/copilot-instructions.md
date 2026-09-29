@@ -103,7 +103,7 @@ Port the stateless, easily-testable utilities first.
 | Mutex / atomics | `mutex.c`, `mutex_unix.c` | `liter-sync` |
 | UTF-8/16 codec | `utf.c` | `liter-unicode` |
 | Printf / strftime | `printf.c`, `date.c` | `liter-fmt` |
-| Hash tables | `hash.c` | (inline in `liter-util`) |
+| Hash tables | `hash.c` | `std::collections::HashMap` (no custom crate) |
 | Global config | `global.c`, `config.c` | `liter-config` |
 
 ### Phase 2 — Storage Engine (Weeks 13–26)
@@ -468,12 +468,12 @@ liter/                     (Cargo workspace root)
 
 ## 6. C API Compatibility Layer
 
-The `liter-ffi` crate exports the full `sqlite3.h` surface as `extern "C"` symbols, enabling drop-in replacement.
+The `liter-ffi` crate will export the full `sqlite3.h` surface as `extern "C"` symbols, enabling drop-in replacement. Currently a skeleton — full API coverage is a future goal.
 
 ```rust
 // liter-ffi/src/lib.rs
 
-use sqlite3::Connection;
+use liter::Connection;
 use std::ffi::{CStr, c_char, c_int, c_void};
 
 /// Opaque handle — the public sqlite3* pointer
